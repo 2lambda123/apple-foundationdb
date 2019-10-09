@@ -148,7 +148,7 @@ struct TransactionInfo {
 };
 
 struct TransactionLogInfo : public ReferenceCounted<TransactionLogInfo>, NonCopyable {
-	enum LoggingLocation { DONT_LOG = 0, TRACE_LOG = 1, DATABASE = 2 };
+	enum LoggingLocation { DONT_LOG = 0, TRACE_LOG = 1, DATABASE = 2, REQ_STATS = 4 };
 
 	TransactionLogInfo() : logLocation(DONT_LOG), maxFieldLength(0) {}
 	TransactionLogInfo(LoggingLocation location) : logLocation(location), maxFieldLength(0) {}
@@ -173,7 +173,14 @@ struct TransactionLogInfo : public ReferenceCounted<TransactionLogInfo>, NonCopy
 			static_assert(std::is_base_of<FdbClientLogEvents::Event, T>::value, "Event should be derived class of FdbClientLogEvents::Event");
 			trLogWriter << event;
 		}
+
+		if(logLocation & REQ_STATS) {
+			static_assert(std::is_base_of<FdbClientLogEvents::Event, T>::value, "Event should be derived class of FdbClientLogEvents::Event");
+			event.addToReqStats(requestStats);
+		}
 	}
+
+	RequestStats requestStats;
 
 	BinaryWriter trLogWriter{ IncludeVersion() };
 	bool logsAdded{ false };
@@ -281,7 +288,6 @@ public:
 	int numErrors;
 
 	std::vector<Reference<Watch>> watches;
-
 	int apiVersionAtLeast(int minVersion) const;
 
 	void checkDeferredError();

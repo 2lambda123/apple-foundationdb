@@ -39,18 +39,41 @@ namespace ClientLogEventsParser {
 		ASSERT(gv.priorityType >= 0 && gv.priorityType < FdbClientLogEvents::PRIORITY_END);
 	}
 
-	void parseEventGet(BinaryReader &reader) {
-		FdbClientLogEvents::EventGet g;
+	void parseEventGetKey(BinaryReader &reader) {
+		FdbClientLogEvents::EventGetKey g;
 		reader >> g;
-		ASSERT(g.latency < 10000 && g.valueSize < CLIENT_KNOBS->VALUE_SIZE_LIMIT && g.key.size() < CLIENT_KNOBS->SYSTEM_KEY_SIZE_LIMIT);
+		ASSERT(g.readId >= 0 && g.latency < 1e4 && g.key.size() < CLIENT_KNOBS->SYSTEM_KEY_SIZE_LIMIT &&
+			g.storageContacted.isValid());
 	}
+	
+	void parseEventGetValue(BinaryReader &reader) {
+		FdbClientLogEvents::EventGetValue g;
+		reader >> g;
+	    ASSERT(g.latency < 10000 && g.valueSize < CLIENT_KNOBS->VALUE_SIZE_LIMIT &&
+	           g.key.size() < CLIENT_KNOBS->SYSTEM_KEY_SIZE_LIMIT);
+    }
 
-	void parseEventGetRange(BinaryReader &reader) {
-		FdbClientLogEvents::EventGetRange gr;
+    void parseEventGetValue_V3(BinaryReader& reader) {
+	    FdbClientLogEvents::EventGetValue_V3 g;
+	    reader >> g;
+	    ASSERT(g.readId >= 0 && g.latency < 10000 && g.valueSize < CLIENT_KNOBS->VALUE_SIZE_LIMIT &&
+	           g.key.size() < CLIENT_KNOBS->SYSTEM_KEY_SIZE_LIMIT && g.storageContacted.isValid());
+    }
+
+    void parseEventGetRange(BinaryReader& reader) {
+	    FdbClientLogEvents::EventGetRange gr;
 		reader >> gr;
 		ASSERT(gr.latency < 10000 && gr.rangeSize < 1000000000 && gr.startKey.size() < CLIENT_KNOBS->SYSTEM_KEY_SIZE_LIMIT && gr.endKey.size() < CLIENT_KNOBS->SYSTEM_KEY_SIZE_LIMIT);
-	}
+    }
 
+    void parseEventGetSubRange(BinaryReader &reader) {
+		FdbClientLogEvents::EventGetSubRange gsr;
+		reader >> gsr;
+		ASSERT(gsr.readId >= 0 && gsr.latency < 1e4 && gsr.bytesFetched < 1e9 && gsr.keysFetched < 1e8 &&
+			gsr.beginKey.size() < CLIENT_KNOBS->SYSTEM_KEY_SIZE_LIMIT &&
+			gsr.endKey.size() < CLIENT_KNOBS->SYSTEM_KEY_SIZE_LIMIT && gsr.storageContacted.isValid());
+	}
+	
 	void parseEventCommit(BinaryReader &reader) {
 		FdbClientLogEvents::EventCommit c;
 		reader >> c;
@@ -70,19 +93,28 @@ namespace ClientLogEventsParser {
 	}
 
 	void parseEventErrorCommit(BinaryReader &reader) {
-			FdbClientLogEvents::EventCommitError ce;
-			reader >> ce;
-			ASSERT(ce.errCode < 10000);
+		FdbClientLogEvents::EventCommitError ce;
+		reader >> ce;
+		ASSERT(ce.errCode < 10000);
+	}
+
+	void parseEventContactedProxy(BinaryReader &reader) {
+		FdbClientLogEvents::EventContactedProxy cp;
+		reader >> cp;
+		ASSERT(cp.proxyContacted.isValid());
 	}
 
 	struct ParserBase {
 		std::function<void (BinaryReader &)> parseGetVersion = parseEventGetVersion;
-		std::function<void (BinaryReader &)> parseGet = parseEventGet;
+		std::function<void (BinaryReader &)> parseGetKey = parseEventGetKey;
+		std::function<void (BinaryReader &)> parseGetValue = parseEventGetValue;
 		std::function<void (BinaryReader &)> parseGetRange = parseEventGetRange;
+		std::function<void (BinaryReader &)> parseGetSubRange = parseEventGetSubRange;
 		std::function<void (BinaryReader &)> parseCommit = parseEventCommit;
 		std::function<void (BinaryReader &)> parseErrorGet = parseEventErrorGet;
 		std::function<void (BinaryReader &)> parseErrorGetRange = parseEventErrorGetRange;
 		std::function<void (BinaryReader &)> parseErrorCommit = parseEventErrorCommit;
+		std::function<void (BinaryReader &)> parseContactedProxy = parseEventContactedProxy;
 		virtual ~ParserBase() = 0;
 	};
 	ParserBase::~ParserBase() {}
@@ -94,16 +126,21 @@ namespace ClientLogEventsParser {
 		Parser_V2() { parseGetVersion = parseEventGetVersion_V2; }
 		virtual ~Parser_V2() override {}
 	};
+    struct Parser_V3 : Parser_V2 {
+	    Parser_V3() { parseGetValue = parseEventGetValue_V3; }
+    };
 
-	struct ParserFactory {
-		static std::unique_ptr<ParserBase> getParser(ProtocolVersion version) {
-			if(version.version() >= (uint64_t) 0x0FDB00B062000001LL) {
-				return std::unique_ptr<ParserBase>(new Parser_V2());
-			} else {
-				return std::unique_ptr<ParserBase>(new Parser_V1());
-			}
-		}
-	};
+    struct ParserFactory {
+	    static std::unique_ptr<ParserBase> getParser(ProtocolVersion version) {
+		    if (version.version() >= (uint64_t)0x0FDB00B062010001LL) {
+			    return std::unique_ptr<ParserBase>(new Parser_V3());
+		    } else if (version.version() >= (uint64_t)0x0FDB00B062000001LL) {
+			    return std::unique_ptr<ParserBase>(new Parser_V2());
+		    } else {
+			    return std::unique_ptr<ParserBase>(new Parser_V1());
+		    }
+	    }
+    };
 };
 
 // Checks TransactionInfo format
@@ -125,14 +162,23 @@ bool checkTxInfoEntryFormat(BinaryReader &reader) {
 		case FdbClientLogEvents::GET_VERSION_LATENCY:
 			parser->parseGetVersion(reader);
 			break;
-		case FdbClientLogEvents::GET_LATENCY:
-			parser->parseGet(reader);
+		case FdbClientLogEvents::GET_KEY:
+			parser->parseGetKey(reader);
 			break;
-		case FdbClientLogEvents::GET_RANGE_LATENCY:
+		case FdbClientLogEvents::GET_VALUE:
+			parser->parseGetValue(reader);
+			break;
+		case FdbClientLogEvents::GET_RANGE:
 			parser->parseGetRange(reader);
+			break;
+		case FdbClientLogEvents::GET_SUBRANGE:
+			parser->parseGetSubRange(reader);
 			break;
 		case FdbClientLogEvents::COMMIT_LATENCY:
 			parser->parseCommit(reader);
+			break;
+		case FdbClientLogEvents::CONTACTED_PROXY:
+			parser->parseContactedProxy(reader);
 			break;
 		case FdbClientLogEvents::ERROR_GET:
 			parser->parseErrorGet(reader);

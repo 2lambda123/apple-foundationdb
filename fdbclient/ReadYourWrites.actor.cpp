@@ -1228,6 +1228,13 @@ Future< Optional<Value> > ReadYourWritesTransaction::get( const Key& key, bool s
 		return Optional<Value>();
 	}
 
+	if (key == LiteralStringRef("\xff\xff/request_stats")){
+		if (!tr.trLogInfo) {
+			return Optional<Value>();
+		}
+		return Optional<Value>(json_spirit::write_string(json_spirit::Value(tr.trLogInfo->requestStats.getJson())));
+	}
+
 	if(checkUsedDuringCommit()) {
 		return used_during_commit();
 	}
