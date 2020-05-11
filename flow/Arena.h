@@ -161,9 +161,11 @@ struct ArenaBlock : NonCopyable, ThreadSafeReferenceCounted<ArenaBlock>
 	static ArenaBlock* create(int dataSize, Reference<ArenaBlock>& next);
 	void destroy();
 	void destroyLeaf();
+	bool canAlloc(int bytes) const;
 
 private:
 	static void* operator new(size_t s); // not implemented
+	int alignment(int bytes) const;
 };
 
 inline Arena::Arena() : impl( NULL ) {}
@@ -187,7 +189,9 @@ inline void Arena::dependsOn( const Arena& p ) {
 		ArenaBlock::dependOn( impl, p.impl.getPtr() );
 }
 inline size_t Arena::getSize() const { return impl ? impl->totalSize() : 0; }
-inline bool Arena::hasFree( size_t size, const void *address ) { return impl && impl->unused() >= size && impl->getNextData() == address; }
+inline bool Arena::hasFree( size_t size, const void *address ) {
+	return impl && impl->canAlloc(size) && impl->getNextData() == address;
+}
 inline void* operator new ( size_t size, Arena& p ) {
 	UNSTOPPABLE_ASSERT( size < std::numeric_limits<int>::max() );
 	return ArenaBlock::allocate( p.impl, (int)size );

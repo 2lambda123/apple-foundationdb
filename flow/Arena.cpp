@@ -18,7 +18,8 @@
  * limitations under the License.
  */
 
-#include "Arena.h"
+#include "flow/Arena.h"
+#include "flow/Error.h"
 
 void ArenaBlock::delref() {
 	if (delref_no_destroy()) destroy();
@@ -81,15 +82,18 @@ int ArenaBlock::addUsed(int bytes) {
 	if (isTiny()) {
 		int t = tinyUsed;
 		tinyUsed += bytes;
+		UNSTOPPABLE_ASSERT(tinyUsed <= tinySize);
 		return t;
 	} else {
 		int t = bigUsed;
 		bigUsed += bytes;
+		UNSTOPPABLE_ASSERT(bigUsed <= bigSize);
 		return t;
 	}
 }
 
 void ArenaBlock::makeReference(ArenaBlock* next) {
+	// TODO: Align memory here?
 	ArenaBlockRef* r = (ArenaBlockRef*)((char*)getData() + bigUsed);
 	r->next = next;
 	r->nextBlockOffset = nextBlockOffset;
@@ -99,28 +103,58 @@ void ArenaBlock::makeReference(ArenaBlock* next) {
 
 void ArenaBlock::dependOn(Reference<ArenaBlock>& self, ArenaBlock* other) {
 	other->addref();
-	if (!self || self->isTiny() || self->unused() < sizeof(ArenaBlockRef))
+	if (!self || self->isTiny() || !self->canAlloc(sizeof(ArenaBlockRef)))
 		create(SMALL, self)->makeReference(other);
 	else
 		self->makeReference(other);
 }
 
+static int alignment_for(int size) {
+	if (size <= 1) {
+		return 1;
+	} else if (size <= 2) {
+		return 2;
+	} else if (size <= 4) {
+		return 4;
+	} else if (size <= 8) {
+		return 8;
+	}
+	return 16;
+}
+
 void* ArenaBlock::allocate(Reference<ArenaBlock>& self, int bytes) {
 	ArenaBlock* b = self.getPtr();
-	if (!self || self->unused() < bytes) b = create(bytes, self);
+	if (!self || !self->canAlloc(bytes))
+		b = create(bytes, self);
 
-	return (char*)b->getData() + b->addUsed(bytes);
+	auto a = b->alignment(bytes);
+	auto res = (char*)b->getData() + a + b->addUsed(bytes + a);
+	ASSERT(reinterpret_cast<uintptr_t>(res) % alignment_for(bytes) == 0);
+	return res;
+}
+
+static inline int sizeWithOffset(int bytes, int offset) {
+	if (bytes == 0) {
+		return 0;
+	}
+	auto a = alignment_for(bytes);
+	auto off = offset % a;
+	if (off == 0) {
+		return bytes;
+	}
+	return a - off + bytes;
 }
 
 // Return an appropriately-sized ArenaBlock to store the given data
 ArenaBlock* ArenaBlock::create(int dataSize, Reference<ArenaBlock>& next) {
 	ArenaBlock* b;
-	if (dataSize <= SMALL - TINY_HEADER && !next) {
-		if (dataSize <= 16 - TINY_HEADER) {
+	auto tinyBytes = sizeWithOffset(dataSize, TINY_HEADER);
+	if (tinyBytes <= SMALL - TINY_HEADER && !next) {
+		if (tinyBytes <= 16 - TINY_HEADER) {
 			b = (ArenaBlock*)FastAllocator<16>::allocate();
 			b->tinySize = 16;
 			INSTRUMENT_ALLOCATE("Arena16");
-		} else if (dataSize <= 32 - TINY_HEADER) {
+		} else if (tinyBytes <= 32 - TINY_HEADER) {
 			b = (ArenaBlock*)FastAllocator<32>::allocate();
 			b->tinySize = 32;
 			INSTRUMENT_ALLOCATE("Arena32");
@@ -132,6 +166,7 @@ ArenaBlock* ArenaBlock::create(int dataSize, Reference<ArenaBlock>& next) {
 		b->tinyUsed = TINY_HEADER;
 
 	} else {
+		dataSize = sizeWithOffset(dataSize, sizeof(ArenaBlock));
 		int reqSize = dataSize + sizeof(ArenaBlock);
 		if (next) reqSize += sizeof(ArenaBlockRef);
 
@@ -273,4 +308,23 @@ void ArenaBlock::destroyLeaf() {
 			delete[](uint8_t*) this;
 		}
 	}
+}
+
+bool ArenaBlock::canAlloc(int bytes) const {
+	if (bytes == 0) return true;
+	return used() + bytes + alignment(bytes) <= size();
+}
+
+static inline int alignment_from(int bytes, uintptr_t addr) {
+	if (bytes == 0) return 0;
+	auto a = alignment_for(bytes);
+	auto off = int(addr % a);
+	if (off == 0) {
+		return 0;
+	}
+	return a - off;
+}
+
+int ArenaBlock::alignment(int bytes) const {
+	return alignment_from(bytes, reinterpret_cast<uintptr_t>(this) + used());
 }
