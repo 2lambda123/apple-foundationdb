@@ -194,6 +194,8 @@ public:
 	int64_t versionLag; // An estimate for how many versions it takes for the data to move from the logs to this cache server
 	bool behind;
 
+	Version readTxnLifetime = 5.0 * SERVER_KNOBS->VERSIONS_PER_SECOND;
+
 	// TODO double check which ones we need for storageCache servers
 	struct Counters {
 		CounterCollection cc;
@@ -1626,6 +1628,11 @@ private:
 			cacheStartKey = m.param1;
 			nowAssigned = m.param2 != serverKeysFalse;
 			processedCacheStartKey = true;
+		} else if (m.type == MutationRef::SetValue && m.param1 == readTxnLifetimeKey) {
+			TraceEvent("SetStorageCacheReadTransactionLifetime", data->thisServerID)
+			    .detail("OldReadTxnLifetime", data->readTxnLifetime)
+			    .detail("NewReadTxnLifetime", BinaryReader::fromStringRef<int64_t>(m.param2, Unversioned()));
+			data->readTxnLifetime = BinaryReader::fromStringRef<int64_t>(m.param2, Unversioned());
 		} else if (m.type == MutationRef::SetValue && m.param1 == lastEpochEndPrivateKey) {
 			// lastEpochEnd transactions are guaranteed by the master to be alone in their own batch (version)
 			// That means we don't have to worry about the impact on changeServerKeys
@@ -1910,6 +1917,14 @@ ACTOR Future<Void> pullAsyncData( StorageCacheData *data ) {
 
 			validate(data);
 
+<<<<<<< HEAD
+			// we can get rid of versions beyond maxVerionsInMemory at any point. Update the
+			//desiredOldestVersion and that may invoke the compaction actor
+			Version maxVersionsInMemory = data->readTxnLifetime;
+			Version proposedOldestVersion = data->version.get() - maxVersionsInMemory;
+			proposedOldestVersion = std::max(proposedOldestVersion, data->oldestVersion.get());
+			data->desiredOldestVersion.set(proposedOldestVersion);
+=======
 			data->lastTLogVersion = cloneCursor2->getMaxKnownVersion();
 			cursor->advanceTo( cloneCursor2->version() );
 			data->versionLag = std::max<int64_t>(0, data->lastTLogVersion - data->version.get());
@@ -1927,6 +1942,7 @@ ACTOR Future<Void> pullAsyncData( StorageCacheData *data ) {
 			} else {
 				throw e;
 			}
+>>>>>>> master
 		}
 
 		tagAt = std::max( tagAt, cursor->version().version);

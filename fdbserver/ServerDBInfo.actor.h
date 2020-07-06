@@ -35,6 +35,7 @@
 #include "fdbserver/WorkerInterface.actor.h"
 #include "flow/actorcompiler.h" // This must be the last #include.
 
+// TODO: May add TXN lifetime here
 struct ServerDBInfo {
 	constexpr static FileIdentifier file_identifier = 13838807;
 	// This structure contains transient information which is broadcast to all workers for a database,
@@ -56,6 +57,7 @@ struct ServerDBInfo {
 	std::vector<UID> priorCommittedLogServers;   // If !fullyRecovered and logSystemConfig refers to a new log system which may not have been committed to the coordinated state yet, then priorCommittedLogServers are the previous, fully committed generation which need to stay alive in case this recovery fails
 	Optional<LatencyBandConfig> latencyBandConfig;
 	int64_t infoGeneration;
+	Version readTxnLifetime;
 
 	ServerDBInfo() : recoveryCount(0), recoveryState(RecoveryState::UNINITIALIZED), logSystemConfig(0), infoGeneration(0) {}
 
@@ -64,7 +66,7 @@ struct ServerDBInfo {
 
 	template <class Ar>
 	void serialize( Ar& ar ) {
-		serializer(ar, id, clusterInterface, client, distributor, master, ratekeeper, resolvers, recoveryCount, recoveryState, masterLifetime, logSystemConfig, priorCommittedLogServers, latencyBandConfig, infoGeneration);
+		serializer(ar, id, clusterInterface, client, distributor, master, ratekeeper, resolvers, recoveryCount, recoveryState, masterLifetime, logSystemConfig, priorCommittedLogServers, latencyBandConfig, infoGeneration, readTxnLifetime);
 	}
 };
 
