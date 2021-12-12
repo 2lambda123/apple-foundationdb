@@ -18,6 +18,7 @@
  * limitations under the License.
  */
 
+#include <string>
 #define SQLITE_THREADSAFE 0 // also in sqlite3.amalgamation.c!
 #include "flow/crc32c.h"
 #include "fdbserver/IKeyValueStore.h"
@@ -1564,8 +1565,14 @@ struct ThreadSafeCounter {
 
 class KeyValueStoreSQLite final : public IKeyValueStore {
 public:
-	void dispose() override { doClose(this, true); }
-	void close() override { doClose(this, false); }
+	void dispose() override {
+		TraceEvent(SevDebug, "LocalBTREEKVStore").detail("Action", "dispose");
+		doClose(this, true);
+	}
+	void close() override {
+		TraceEvent(SevDebug, "LocalBTREEKVStore").detail("Action", "close").backtrace();
+		doClose(this, false);
+	}
 
 	Future<Void> getError() const override { return delayed(readThreads->getError() || writeThread->getError()); }
 	Future<Void> onClosed() const override { return stopped.getFuture(); }
@@ -2064,7 +2071,7 @@ private:
 			error = e;
 		}
 
-		TraceEvent("KVClosed", self->logID).detail("Filename", self->filename);
+		TraceEvent("KVClosed", self->logID).detail("Filename", self->filename).backtrace();
 		if (error.code() != error_code_actor_cancelled) {
 			self->stopped.send(Void());
 			delete self;
@@ -2094,7 +2101,6 @@ ACTOR Future<Void> cleanPeriodically(KeyValueStoreSQLite* self) {
 		if (duration == std::numeric_limits<double>::max()) {
 			duration = SERVER_KNOBS->SPRING_CLEANING_NO_ACTION_INTERVAL;
 		}
-
 		wait(delayJittered(duration));
 	}
 }
@@ -2157,6 +2163,7 @@ KeyValueStoreSQLite::KeyValueStoreSQLite(std::string const& filename,
 	logging = logPeriodically(this);
 }
 KeyValueStoreSQLite::~KeyValueStoreSQLite() {
+	TraceEvent(SevDebug, "KeyValueStoreSQLiteDestoryed").log();
 	// printf("dbf=%lld bytes, wal=%lld bytes\n", getFileSize((filename+".fdb").c_str()),
 	// getFileSize((filename+".fdb-wal").c_str()));
 }
@@ -2164,6 +2171,7 @@ KeyValueStoreSQLite::~KeyValueStoreSQLite() {
 StorageBytes KeyValueStoreSQLite::getStorageBytes() const {
 	int64_t free;
 	int64_t total;
+	// TraceEvent(SevDebug, "LocalBTREEKVStore").detail("Action", "getStorageByte");
 
 	g_network->getDiskBytes(parentDirectory(filename), free, total);
 
@@ -2181,14 +2189,17 @@ void KeyValueStoreSQLite::startReadThreads() {
 }
 
 void KeyValueStoreSQLite::set(KeyValueRef keyValue, const Arena* arena) {
+	// TraceEvent(SevDebug, "LocalBTREEKVStore").detail("Action", "set").detail("KeyValue", keyValue);
 	++writesRequested;
 	writeThread->post(new Writer::SetAction(keyValue));
 }
 void KeyValueStoreSQLite::clear(KeyRangeRef range, const Arena* arena) {
+	// TraceEvent(SevDebug, "LocalBTREEKVStore").detail("Action", "clear");
 	++writesRequested;
 	writeThread->post(new Writer::ClearAction(range));
 }
 Future<Void> KeyValueStoreSQLite::commit(bool sequential) {
+	// TraceEvent(SevDebug, "LocalBTREEKVStore").detail("Action", "commit");
 	++writesRequested;
 	auto p = new Writer::CommitAction;
 	auto f = p->result.getFuture();
@@ -2223,6 +2234,7 @@ Future<RangeResult> KeyValueStoreSQLite::readRange(KeyRangeRef keys,
 	return f;
 }
 Future<KeyValueStoreSQLite::SpringCleaningWorkPerformed> KeyValueStoreSQLite::doClean() {
+	// TraceEvent(SevDebug, "LocalBTREEKVStore").detail("Action", "clean");
 	++writesRequested;
 	auto p = new Writer::SpringCleaningAction;
 	auto f = p->result.getFuture();

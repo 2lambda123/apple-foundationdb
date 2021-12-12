@@ -4,11 +4,22 @@
 #define BOOST_REGEX_NO_LIB
 #include <boost/process.hpp>
 #endif
+#include "boost/algorithm/string.hpp"
 #include "fdbserver/FDBExecHelper.actor.h"
 #include "flow/Trace.h"
+#include "flow/genericactors.actor.h"
 #include "flow/flow.h"
 #include "fdbclient/versions.h"
 #include "fdbserver/Knobs.h"
+#include "fdbserver/RemoteIKeyValueStore.actor.h"
+#include "fdbrpc/FlowProcess.actor.h"
+#include "fdbrpc/simulator.h"
+#include "fdbclient/WellKnownEndpoints.h"
+#include "flow/Platform.h"
+#include "flow/network.h"
+#include "fdbrpc/Net2FileSystem.h"
+#include "fdbserver/CoroFlow.h"
+#include "flow/TLSConfig.actor.h"
 #include "flow/actorcompiler.h" // This must be the last #include.
 
 ExecCmdValueString::ExecCmdValueString(StringRef pCmdValueString) {
@@ -70,12 +81,125 @@ void ExecCmdValueString::dbgPrint() const {
 	return;
 }
 
+ACTOR Future<int> spawnSimulated(std::vector<std::string> paramList,
+                                 double maxWaitTime,
+                                 bool isSync,
+                                 double maxSimDelayTime) {
+	state ISimulator::ProcessInfo* self = g_pSimulator->getCurrentProcess();
+	state ISimulator::ProcessInfo* child;
+
+	state std::string role;
+	state std::string addr;
+	state std::string flowProcessName;
+	state Endpoint flowProcessEndpoint;
+	state int i = 0;
+	for (; i < paramList.size(); i++) {
+		if (paramList.size() > i + 1) {
+			// temporary args parser that only supports the flowprocess role
+			if (paramList[i] == "-r") {
+				role = paramList[i + 1];
+			} else if (paramList[i] == "-p" || paramList[i] == "--public_address") {
+				addr = paramList[i + 1];
+			} else if (paramList[i] == "--process_name") {
+				flowProcessName = paramList[i + 1];
+			} else if (paramList[i] == "--process_endpoint") {
+				state std::vector<std::string> addressArray;
+				boost::split(addressArray, paramList[i + 1], [](char c) { return c == ','; });
+				if (addressArray.size() != 3) {
+					std::cerr << "Invalid argument, expected 3 elements in --process_endpoint got "
+					          << addressArray.size() << std::endl;
+					flushAndExit(FDB_EXIT_ERROR);
+				}
+				try {
+					auto addr = NetworkAddress::parse(addressArray[0]);
+					uint64_t fst = std::stoul(addressArray[1]);
+					uint64_t snd = std::stoul(addressArray[2]);
+					UID token(fst, snd);
+					NetworkAddressList l;
+					l.address = addr;
+					flowProcessEndpoint = Endpoint(l, token);
+					std::cout << "flowProcessEndpoint: " << flowProcessEndpoint.getPrimaryAddress().toString()
+					          << ", token: " << flowProcessEndpoint.token.toString() << "\n";
+				} catch (Error& e) {
+					std::cerr << "Could not parse network address " << addressArray[0] << std::endl;
+					flushAndExit(FDB_EXIT_ERROR);
+				}
+			}
+		}
+	}
+	state int result = 0;
+	// short port = 8716;
+	child = g_pSimulator->newProcess("remote flow process",
+	                                 self->address.ip,
+	                                 0,
+	                                 false,
+	                                 1,
+	                                 self->locality,
+	                                 ProcessClass(ProcessClass::UnsetClass, ProcessClass::AutoSource),
+	                                 self->dataFolder,
+	                                 self->coordinationFolder,
+	                                 self->protocolVersion);
+	wait(g_pSimulator->onProcess(child));
+	state Future<ISimulator::KillType> onShutdown = child->onShutdown();
+	state Future<ISimulator::KillType> parentShutdown = self->onShutdown();
+
+	try {
+		// TODO: parse paramList
+		TraceEvent(SevDebug, "SpawnedChildProcess").detail("IP", child->toString());
+		std::string role = "";
+		std::string addr = "";
+		for (int i = 0; i < paramList.size(); i++) {
+			if (paramList.size() > i + 1 && paramList[i] == "-r") {
+				role = paramList[i + 1];
+			}
+		}
+		if (role == "flowprocess") {
+			FlowTransport::createInstance(false, 1, WLTOKEN_IKVS_RESERVED_COUNT);
+			FlowTransport::transport().bind(child->address, child->address);
+			Sim2FileSystem::newFileSystem();
+			Future<Void> f = runFlowProcess(flowProcessName, flowProcessEndpoint);
+
+			choose {
+				when(wait(success(onShutdown) || f)) { TraceEvent(SevDebug, "ChildProcessKilled").log(); }
+				when(wait(success(parentShutdown))) {
+					TraceEvent(SevDebug, "ParentProcessKilled").log();
+					g_pSimulator->killProcess(child, ISimulator::KillInstantly);
+				}
+			}
+		} else {
+			ASSERT(false);
+		}
+	} catch (Error& e) {
+		TraceEvent(e.code() == error_code_actor_cancelled ? SevInfo : SevError, "RemoteIKVSDied").error(e, true);
+		if (e.code() == error_code_actor_cancelled) {
+			throw;
+		}
+		if (e.code() == error_code_io_timeout && !onShutdown.isReady()) {
+			TraceEvent(SevDebug, "SpawnedProcessRebooting").log();
+			onShutdown = ISimulator::RebootProcess;
+		}
+		if (onShutdown.isReady() && onShutdown.isError()) {
+			TraceEvent(SevDebug, "SpawnedProcessError").log();
+			throw onShutdown.getError();
+		}
+		result = -1;
+	}
+	wait(g_pSimulator->onProcess(self));
+	g_pSimulator->destroyProcess(child);
+	TraceEvent(SevDebug, "BackOnParentProcess").detail("Result", std::to_string(result));
+	return result;
+}
+
 #if defined(_WIN32) || defined(__APPLE__) || defined(__INTEL_COMPILER)
 ACTOR Future<int> spawnProcess(std::string binPath,
                                std::vector<std::string> paramList,
                                double maxWaitTime,
                                bool isSync,
                                double maxSimDelayTime) {
+	if (g_network->isSimulated() && getExecPath() == binPath) {
+		int res = wait(spawnSimulated(paramList, maxWaitTime, isSync, maxSimDelayTime));
+		return res;
+	}
 	wait(delay(0.0));
 	return 0;
 }
@@ -97,7 +221,9 @@ static auto fork_child(const std::string& path, std::vector<char*>& paramList) {
 		dup2(writeFD, 1); // stdout
 		dup2(writeFD, 2); // stderr
 		close(writeFD);
-		execv(&path[0], &paramList[0]);
+		int execNo = execv(&path[0], &paramList[0]);
+		std::cout << "execv: " << execNo << std::endl;
+		std::cout << "errno: " << errno << std::endl;
 		_exit(EXIT_FAILURE);
 	}
 	close(writeFD);
@@ -105,6 +231,8 @@ static auto fork_child(const std::string& path, std::vector<char*>& paramList) {
 }
 
 static void setupTraceWithOutput(TraceEvent& event, size_t bytesRead, char* outputBuffer) {
+	std::cout << "Output bytesRead: " << bytesRead << std::endl;
+	std::cout << "output buffer: " << std::string(outputBuffer) << std::endl;
 	if (bytesRead == 0)
 		return;
 	ASSERT(bytesRead <= SERVER_KNOBS->MAX_FORKED_PROCESS_OUTPUT);
@@ -120,6 +248,10 @@ ACTOR Future<int> spawnProcess(std::string path,
                                double maxWaitTime,
                                bool isSync,
                                double maxSimDelayTime) {
+	if (g_network->isSimulated() && getExecPath() == path) {
+		int res = wait(spawnSimulated(args, maxWaitTime, isSync, maxSimDelayTime));
+		return res;
+	}
 	// for async calls in simulator, always delay by a deterministic amount of time and then
 	// do the call synchronously, otherwise the predictability of the simulator breaks
 	if (!isSync && g_network->isSimulated()) {
@@ -183,7 +315,8 @@ ACTOR Future<int> spawnProcess(std::string path,
 					break;
 				bytesRead += bytes;
 			}
-
+			TraceEvent(SevDebug, "SpawnPID").detail("PID", pid);
+			TraceEvent(SevDebug, "errorPID").detail("errno", err);
 			if (err < 0) {
 				TraceEvent event(SevWarnAlways, "SpawnProcessFailure");
 				setupTraceWithOutput(event, bytesRead, outputBuffer);

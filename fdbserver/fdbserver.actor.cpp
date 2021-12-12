@@ -20,6 +20,11 @@
 
 // There's something in one of the files below that defines a macros
 // a macro that makes boost interprocess break on Windows.
+#include "fdbrpc/fdbrpc.h"
+// #include "flow/Error.h"
+#include "flow/flow.h"
+// #include "flow/genericactors.actor.h"
+#include "flow/network.h"
 #define BOOST_DATE_TIME_NO_LIB
 
 #include <algorithm>
@@ -45,6 +50,7 @@
 #include "fdbclient/WellKnownEndpoints.h"
 #include "fdbmonitor/SimpleIni.h"
 #include "fdbrpc/AsyncFileCached.actor.h"
+#include "fdbrpc/FlowProcess.actor.h"
 #include "fdbrpc/Net2FileSystem.h"
 #include "fdbrpc/PerfMetric.h"
 #include "fdbrpc/simulator.h"
@@ -52,9 +58,11 @@
 #include "fdbserver/CoordinationInterface.h"
 #include "fdbserver/CoroFlow.h"
 #include "fdbserver/DataDistribution.actor.h"
+#include "fdbserver/FDBExecHelper.actor.h"
 #include "fdbserver/IKeyValueStore.h"
 #include "fdbserver/MoveKeys.actor.h"
 #include "fdbserver/NetworkTest.h"
+#include "fdbserver/RemoteIKeyValueStore.actor.h"
 #include "fdbserver/RestoreWorkerInterface.actor.h"
 #include "fdbserver/ServerDBInfo.h"
 #include "fdbserver/SimulatedCluster.h"
@@ -99,7 +107,7 @@ enum {
 	OPT_DCID, OPT_MACHINE_CLASS, OPT_BUGGIFY, OPT_VERSION, OPT_BUILD_FLAGS, OPT_CRASHONERROR, OPT_HELP, OPT_NETWORKIMPL, OPT_NOBUFSTDOUT, OPT_BUFSTDOUTERR,
 	OPT_TRACECLOCK, OPT_NUMTESTERS, OPT_DEVHELP, OPT_ROLLSIZE, OPT_MAXLOGS, OPT_MAXLOGSSIZE, OPT_KNOB, OPT_UNITTESTPARAM, OPT_TESTSERVERS, OPT_TEST_ON_SERVERS, OPT_METRICSCONNFILE,
 	OPT_METRICSPREFIX, OPT_LOGGROUP, OPT_LOCALITY, OPT_IO_TRUST_SECONDS, OPT_IO_TRUST_WARN_ONLY, OPT_FILESYSTEM, OPT_PROFILER_RSS_SIZE, OPT_KVFILE,
-	OPT_TRACE_FORMAT, OPT_WHITELIST_BINPATH, OPT_BLOB_CREDENTIAL_FILE, OPT_CONFIG_PATH, OPT_USE_TEST_CONFIG_DB, OPT_FAULT_INJECTION, OPT_PROFILER, OPT_PRINT_SIMTIME,
+	OPT_TRACE_FORMAT, OPT_WHITELIST_BINPATH, OPT_BLOB_CREDENTIAL_FILE, OPT_CONFIG_PATH, OPT_USE_TEST_CONFIG_DB, OPT_FAULT_INJECTION, OPT_PROFILER, OPT_PRINT_SIMTIME, OPT_FLOW_PROCESS_NAME, OPT_FLOW_PROCESS_ENDPOINT
 };
 
 CSimpleOpt::SOption g_rgOptions[] = {
@@ -186,7 +194,9 @@ CSimpleOpt::SOption g_rgOptions[] = {
 	{ OPT_USE_TEST_CONFIG_DB,    "--use_test_config_db",        SO_NONE },
 	{ OPT_FAULT_INJECTION,       "-fi",                         SO_REQ_SEP },
 	{ OPT_FAULT_INJECTION,       "--fault_injection",           SO_REQ_SEP },
-	{ OPT_PROFILER,	             "--profiler_",                 SO_REQ_SEP},
+	{ OPT_PROFILER,	             "--profiler_",                 SO_REQ_SEP },
+	{ OPT_FLOW_PROCESS_NAME,     "--process_name",              SO_REQ_SEP },
+	{ OPT_FLOW_PROCESS_ENDPOINT, "--process_endpoint",          SO_REQ_SEP },
 	{ OPT_PRINT_SIMTIME,         "--print_sim_time",             SO_NONE },
 
 #ifndef TLS_DISABLED
@@ -949,7 +959,11 @@ enum class ServerRole {
 	SkipListTest,
 	Test,
 	VersionedMapTest,
-	UnitTests
+	UnitTests,
+	FlowProcess,
+	RemoteIKVS,
+	RemoteIKVSClient,
+	SpawnRemoteIKVS
 };
 struct CLIOptions {
 	std::string commandLine;
@@ -1005,6 +1019,8 @@ struct CLIOptions {
 	UnitTestParameters testParams;
 
 	std::map<std::string, std::string> profilerConfig;
+	std::string flowProcessName;
+	Endpoint flowProcessEndpoint;
 	bool printSimTime = false;
 
 	static CLIOptions parseArgs(int argc, char* argv[]) {
@@ -1162,6 +1178,14 @@ private:
 					role = ServerRole::ConsistencyCheck;
 				else if (!strcmp(sRole, "unittests"))
 					role = ServerRole::UnitTests;
+				else if (!strcmp(sRole, "flowprocess"))
+					role = ServerRole::FlowProcess;
+				else if (!strcmp(sRole, "remoteIKVS"))
+					role = ServerRole::RemoteIKVS;
+				else if (!strcmp(sRole, "remoteIKVSClient"))
+					role = ServerRole::RemoteIKVSClient;
+				else if (!strcmp(sRole, "spawnRemoteIKVS"))
+					role = ServerRole::SpawnRemoteIKVS;
 				else {
 					fprintf(stderr, "ERROR: Unknown role `%s'\n", sRole);
 					printHelpTeaser(argv[0]);
@@ -1170,6 +1194,7 @@ private:
 				break;
 			case OPT_PUBLICADDR:
 				argStr = args.OptionArg();
+				std::cout << argStr << "\n";
 				boost::split(tmpStrings, argStr, [](char c) { return c == ','; });
 				publicAddressStrs.insert(publicAddressStrs.end(), tmpStrings.begin(), tmpStrings.end());
 				break;
@@ -1486,6 +1511,42 @@ private:
 			case OPT_USE_TEST_CONFIG_DB:
 				configDBType = ConfigDBType::SIMPLE;
 				break;
+			case OPT_FLOW_PROCESS_NAME:
+				flowProcessName = args.OptionArg();
+				std::cout << flowProcessName << std::endl;
+				break;
+			case OPT_FLOW_PROCESS_ENDPOINT: {
+				std::vector<std::string> strings;
+				std::cout << args.OptionArg() << std::endl;
+				boost::split(strings, args.OptionArg(), [](char c) { return c == ','; });
+				for (auto& str : strings) {
+					std::cout << str << " ";
+				}
+				std::cout << "\n";
+				if (strings.size() != 3) {
+					std::cerr << "Invalid argument, expected 3 elements in --process_endpoint got " << strings.size()
+					          << std::endl;
+					flushAndExit(FDB_EXIT_ERROR);
+				}
+				try {
+					auto addr = NetworkAddress::parse(strings[0]);
+					uint64_t fst = std::stoul(strings[1]);
+					uint64_t snd = std::stoul(strings[2]);
+					UID token(fst, snd);
+					NetworkAddressList l;
+					l.address = addr;
+					flowProcessEndpoint = Endpoint(l, token);
+					std::cout << "flowProcessEndpoint: " << flowProcessEndpoint.getPrimaryAddress().toString()
+					          << ", token: " << flowProcessEndpoint.token.toString() << "\n";
+				} catch (Error& e) {
+					std::cerr << "Could not parse network address " << strings[0] << std::endl;
+					flushAndExit(FDB_EXIT_ERROR);
+				} catch (std::exception& e) {
+					std::cerr << "Could not parse token " << strings[1] << "," << strings[2] << std::endl;
+					flushAndExit(FDB_EXIT_ERROR);
+				}
+				break;
+			}
 			case OPT_PRINT_SIMTIME:
 				printSimTime = true;
 				break;
@@ -1659,6 +1720,15 @@ private:
 };
 } // namespace
 
+ACTOR Future<Void> spawnRemoteIKVSTest() {
+	state IKeyValueStore* store = openKVStore(KeyValueStoreType{}, "", UID(3, 0), 8000, false, false, true);
+	wait(delay(2.0));
+	wait(store->commit());
+
+	std::cout << "reached end" << std::endl;
+	return Void();
+}
+
 int main(int argc, char* argv[]) {
 	// TODO: Remove later, this is just to force the statics to be initialized
 	// otherwise the unit test won't run
@@ -1790,7 +1860,8 @@ int main(int argc, char* argv[]) {
 			FlowTransport::createInstance(false, 1, WLTOKEN_RESERVED_COUNT);
 
 			const bool expectsPublicAddress =
-			    (role == ServerRole::FDBD || role == ServerRole::NetworkTestServer || role == ServerRole::Restore);
+			    (role == ServerRole::FDBD || role == ServerRole::NetworkTestServer || role == ServerRole::Restore ||
+			     role == ServerRole::RemoteIKVS || role == ServerRole::FlowProcess);
 			if (opts.publicAddressStrs.empty()) {
 				if (expectsPublicAddress) {
 					fprintf(stderr, "ERROR: The -p or --public_address option is required\n");
@@ -2125,6 +2196,25 @@ int main(int argc, char* argv[]) {
 			}
 
 			f = result;
+		} else if (role == ServerRole::FlowProcess) {
+			TraceEvent(SevDebug, "StartingFlowProcess").detail("From", "fdbserver");
+			std::cout << opts.flowProcessName << "\n";
+			std::cout << opts.flowProcessEndpoint.getPrimaryAddress().toString() << "\n";
+			if (opts.flowProcessName == "KeyValueStoreProcess") {
+				std::cout << "Factory set\n";
+				ProcessFactory<KeyValueStoreProcess>(opts.flowProcessName.c_str()).create();
+			}
+			std::cout << g_network->getLocalAddress().toString() << "\n";
+			f = stopAfter(runFlowProcess(opts.flowProcessName, opts.flowProcessEndpoint));
+			g_network->run();
+		} else if (role == ServerRole::RemoteIKVS) {
+			TraceEvent(SevDebug, "StartingRemoteIKVSServer").detail("From", "fdbserver");
+			std::cout << g_network->getLocalAddress().toString() << "\n";
+			f = stopAfter(runRemoteServer());
+			g_network->run();
+		} else if (role == ServerRole::SpawnRemoteIKVS) {
+			f = stopAfter(spawnRemoteIKVSTest());
+			g_network->run();
 		}
 
 		int rc = FDB_EXIT_SUCCESS;

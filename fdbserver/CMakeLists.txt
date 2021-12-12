@@ -86,6 +86,8 @@ set(FDBSERVER_SRCS
   Ratekeeper.actor.cpp
   RatekeeperInterface.h
   RecoveryState.h
+  RemoteIKeyValueStore.actor.h
+  RemoteIKeyValueStore.actor.cpp
   RestoreCommon.actor.h
   RestoreCommon.actor.cpp
   RestoreUtil.h
