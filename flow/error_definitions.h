@@ -88,6 +88,7 @@ ERROR( blob_granule_transaction_too_old, 1064, "Read version is older than blob 
 ERROR( blob_manager_replaced, 1065, "This blob manager has been replaced." )
 ERROR( change_feed_popped, 1066, "Tried to read a version older than what has been popped from the change feed" )
 ERROR( remote_kvs_cancelled, 1067, "The remote key-value store is cancelled" )
+ERROR( data_move_cancelled, 1068, "Data move was cancelled" )
 
 ERROR( broken_promise, 1100, "Broken promise" )
 ERROR( operation_cancelled, 1101, "Asynchronous operation cancelled" )
@@ -183,7 +184,7 @@ ERROR( checkpoint_not_found, 2040, "Checkpoint not found" )
 ERROR( key_not_tuple, 2041, "The key cannot be parsed as a tuple" );
 ERROR( value_not_tuple, 2042, "The value cannot be parsed as a tuple" );
 ERROR( mapper_not_tuple, 2043, "The mapper cannot be parsed as a tuple" );
-
+ERROR( invalid_checkpoint_format, 2044, "Invalid checkpoint format" )
 
 ERROR( incompatible_protocol_version, 2100, "Incompatible protocol version" )
 ERROR( transaction_too_large, 2101, "Transaction exceeds byte limit" )

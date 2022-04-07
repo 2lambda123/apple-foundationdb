@@ -152,6 +152,8 @@ struct MoveKeysWorkload : TestWorkload {
 			              &fl2,
 			              false,
 			              relocateShardInterval.pairID,
+			              deterministicRandom()->randomUniqueID(),
+			              true,
 			              &ddEnabledState));
 			TraceEvent(relocateShardInterval.end()).detail("Result", "Success");
 			return Void();

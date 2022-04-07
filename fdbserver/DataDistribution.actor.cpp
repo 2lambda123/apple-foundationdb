@@ -48,6 +48,68 @@
 
 #include "flow/actorcompiler.h" // This must be the last #include.
 
+void DataMove::addShard(const DDShardInfo& shard) {
+	if (!valid) {
+		return;
+	}
+	if (!shard.hasDest) {
+		if (valid) {
+			TraceEvent("DataMoveAddInValidShard")
+			    .detail("DataMoveID", this->meta.id)
+			    .detail("DataMoveMetaData", this->meta.toString())
+			    .detail("DataMovePrimaryDest", describe(this->primaryDest))
+			    .detail("DataMoveRemoteDest", describe(this->remoteDest))
+			    .detail("ShardPrimaryDest", describe(shard.primaryDest))
+			    .detail("ShardRemoteDest", describe(shard.remoteDest));
+		}
+		valid = false;
+		return;
+	}
+	// Assume the dest servers are sorted.
+	if (this->primaryDest.empty() && this->remoteDest.empty()) {
+		this->primaryDest = shard.primaryDest;
+		this->remoteDest = shard.remoteDest;
+		std::sort(this->primaryDest.begin(), this->primaryDest.end());
+		std::sort(this->remoteDest.begin(), this->remoteDest.end());
+	} else {
+		std::vector<UID> ss = shard.primaryDest;
+		std::sort(ss.begin(), ss.end());
+		if (!std::equal(this->primaryDest.begin(), this->primaryDest.end(), ss.begin())) {
+			TraceEvent("DataMoveAddInValidShard")
+			    .detail("DataMoveID", this->meta.id)
+			    .detail("DataMoveMetaData", this->meta.toString())
+			    .detail("DataMovePrimaryDest", describe(this->primaryDest))
+			    .detail("DataMoveRemoteDest", describe(this->remoteDest))
+			    .detail("ShardPrimaryDest", describe(shard.primaryDest))
+			    .detail("ShardRemoteDest", describe(shard.remoteDest));
+			valid = false;
+			return;
+		}
+		ss = shard.remoteDest;
+		std::sort(ss.begin(), ss.end());
+		if (!std::equal(this->remoteDest.begin(), this->remoteDest.end(), ss.begin())) {
+			TraceEvent("DataMoveAddInValidShard")
+			    .detail("DataMoveID", this->meta.id)
+			    .detail("DataMoveMetaData", this->meta.toString())
+			    .detail("DataMovePrimaryDest", describe(this->primaryDest))
+			    .detail("DataMoveRemoteDest", describe(this->remoteDest))
+			    .detail("ShardPrimaryDest", describe(shard.primaryDest))
+			    .detail("ShardRemoteDest", describe(shard.remoteDest));
+			valid = false;
+			return;
+		}
+	}
+
+	// for (const UID& id : shard.primarySrc) {
+	// 	this->meta.src.insert(id);
+	// }
+	// for (const UID& id : shard.remoteSrc) {
+	// 	this->meta.src.insert(id);
+	// }
+	this->primarySrc.push_back(shard.primarySrc);
+	this->remoteSrc.push_back(shard.remoteSrc);
+}
+
 // Read keyservers, return unique set of teams
 ACTOR Future<Reference<InitialDataDistribution>> getInitialDataDistribution(Database cx,
                                                                             UID distributorId,
@@ -70,6 +132,8 @@ ACTOR Future<Reference<InitialDataDistribution>> getInitialDataDistribution(Data
 	loop {
 		server_dc.clear();
 		succeeded = false;
+		result->allServers.clear();
+		result->dataMoves.clear();
 		try {
 
 			// Read healthyZone value which is later used to determine on/off of failure triggered DD
@@ -109,10 +173,14 @@ ACTOR Future<Reference<InitialDataDistribution>> getInitialDataDistribution(Data
 			for (int i = 0; i < workers.get().size(); i++)
 				id_data[workers.get()[i].locality.processId()] = workers.get()[i];
 
-			succeeded = true;
-
 			for (int i = 0; i < serverList.get().size(); i++) {
 				auto ssi = decodeServerListValue(serverList.get()[i].value);
+				UID ssID = decodeServerListKey(serverList.get()[i].key);
+				TraceEvent("DDInitDataServer", distributorId)
+					.detail("TotalServers", serverList.get().size())
+				    .detail("Server", ssi.id())
+				    .detail("KeyID", ssID)
+				    .detail("IsTss", ssi.isTss());
 				if (!ssi.isTss()) {
 					result->allServers.emplace_back(ssi, id_data[ssi.locality.processId()].processClass);
 					server_dc[ssi.id()] = ssi.locality.dcId();
@@ -121,8 +189,21 @@ ACTOR Future<Reference<InitialDataDistribution>> getInitialDataDistribution(Data
 				}
 			}
 
+			if (SERVER_KNOBS->ENABLE_PHYSICAL_SHARD_MOVE) {
+				RangeResult dataMoves = wait(tr.getRange(dataMoveKeys, CLIENT_KNOBS->TOO_MANY));
+				ASSERT(!dataMoves.more && dataMoves.size() < CLIENT_KNOBS->TOO_MANY);
+				for (int i = 0; i < dataMoves.size(); ++i) {
+					result->dataMoves.push_back(decodeDataMoveValue(dataMoves[i].value));
+				}
+				Version readVersion = wait(tr.getReadVersion());
+				TraceEvent("GetInitialDataMove", distributorId).detail("ReadVersion", readVersion);
+			}
+
+			succeeded = true;
+
 			break;
 		} catch (Error& e) {
+			TraceEvent("GetInitialTeamsError", distributorId).errorUnsuppressed(e).log();
 			wait(tr.onError(e));
 
 			ASSERT(!succeeded); // We shouldn't be retrying if we have already started modifying result in this loop
@@ -454,6 +535,7 @@ static std::set<int> const& normalDDQueueErrors() {
 	if (s.empty()) {
 		s.insert(error_code_movekeys_conflict);
 		s.insert(error_code_broken_promise);
+		s.insert(error_code_data_move_cancelled);
 	}
 	return s;
 }
@@ -673,6 +755,25 @@ ACTOR Future<Void> dataDistribution(Reference<DataDistributorData> self,
 			state Promise<Void> readyToStart;
 			state Reference<ShardsAffectedByTeamFailure> shardsAffectedByTeamFailure(new ShardsAffectedByTeamFailure);
 
+			state KeyRangeMap<std::shared_ptr<DataMove>> dataMoveMap(std::make_shared<DataMove>());
+			if (SERVER_KNOBS->ENABLE_PHYSICAL_SHARD_MOVE) {
+				for (int i = 0; i < initData->dataMoves.size(); ++i) {
+					const auto& meta = initData->dataMoves[i];
+					TraceEvent("DDInitFoundDataMove", self->ddId)
+					    .detail("DataMoveID", meta.id)
+					    .detail("DataMove", meta.toString());
+					auto ranges = dataMoveMap.intersectingRanges(meta.range);
+					// ASSERT(ranges.size() == 1);
+					for (auto& r : ranges) {
+						ASSERT(!r.value()->valid);
+					}
+					dataMoveMap.insert(meta.range, std::make_shared<DataMove>(meta, true));
+					// RelocateShard rs(dataMove.range, dataMove.priority, true);
+					// rs.dataMove = dataMove;
+					// output.send(rs);
+				}
+			}
+
 			state int shard = 0;
 			for (; shard < initData->shards.size() - 1; shard++) {
 				KeyRangeRef keys = KeyRangeRef(initData->shards[shard].key, initData->shards[shard + 1].key);
@@ -692,7 +793,7 @@ ACTOR Future<Void> dataDistribution(Reference<DataDistributorData> self,
 				}
 
 				shardsAffectedByTeamFailure->moveShard(keys, teams);
-				if (initData->shards[shard].hasDest) {
+				if (initData->shards[shard].hasDest && !SERVER_KNOBS->ENABLE_PHYSICAL_SHARD_MOVE) {
 					// This shard is already in flight.  Ideally we should use dest in ShardsAffectedByTeamFailure and
 					// generate a dataDistributionRelocator directly in DataDistributionQueue to track it, but it's
 					// easier to just (with low priority) schedule it for movement.
@@ -703,7 +804,35 @@ ACTOR Future<Void> dataDistribution(Reference<DataDistributorData> self,
 					output.send(RelocateShard(
 					    keys, unhealthy ? SERVER_KNOBS->PRIORITY_TEAM_UNHEALTHY : SERVER_KNOBS->PRIORITY_RECOVER_MOVE));
 				}
+
+				if (SERVER_KNOBS->ENABLE_PHYSICAL_SHARD_MOVE) {
+					dataMoveMap[keys.begin]->addShard(initData->shards[shard]);
+				}
+
 				wait(yield(TaskPriority::DataDistribution));
+			}
+
+			if (SERVER_KNOBS->ENABLE_PHYSICAL_SHARD_MOVE) {
+				state int idx = 0;
+				for (; idx < initData->dataMoves.size(); ++idx) {
+					const auto& meta = initData->dataMoves[idx];
+					// auto ranges = dataMoveMap.intersectingRanges(meta.range);
+					// ASSERT(ranges.size() == 1);
+					if (dataMoveMap[meta.range.begin]->valid) {
+						RelocateShard rs(meta.range, SERVER_KNOBS->PRIORITY_RECOVER_MOVE, true);
+						rs.dataMove = dataMoveMap[meta.range.begin];
+						rs.dataMoveId = meta.id;
+						// TODO: Persist priority in DataMoveMetaData.
+						// rs.priority = SERVER_KNOBS->PRIORITY_RECOVER_MOVE;
+						TraceEvent("DDInitRestoredDataMove", self->ddId)
+						    .detail("DataMoveID", dataMoveMap[meta.range.begin]->meta.id)
+						    .detail("DataMove", dataMoveMap[meta.range.begin]->meta.toString());
+						output.send(rs);
+					} else {
+						ASSERT(false);
+					}
+					wait(yield(TaskPriority::DataDistribution));
+				}
 			}
 
 			std::vector<TeamCollectionInterface> tcis;
@@ -883,6 +1012,7 @@ static std::set<int> const& normalDataDistributorErrors() {
 		s.insert(error_code_actor_cancelled);
 		s.insert(error_code_please_reboot);
 		s.insert(error_code_movekeys_conflict);
+		s.insert(error_code_data_move_cancelled);
 	}
 	return s;
 }

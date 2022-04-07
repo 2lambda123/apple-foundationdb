@@ -56,26 +56,58 @@ const KeyRef keyServersKey(const KeyRef& k, Arena& arena);
 const Value keyServersValue(RangeResult result,
                             const std::vector<UID>& src,
                             const std::vector<UID>& dest = std::vector<UID>());
+const Value keyServersValue(RangeResult result,
+                            const std::vector<UID>& src,
+                            const std::vector<UID>& dest,
+                            const UID& srcID,
+                            const UID& destID);
 const Value keyServersValue(const std::vector<Tag>& srcTag, const std::vector<Tag>& destTag = std::vector<Tag>());
+const Value keyServersValue(const std::vector<Tag>& srcTag, const UID& id);
 // `result` must be the full result of getting serverTagKeys
 void decodeKeyServersValue(RangeResult result,
                            const ValueRef& value,
                            std::vector<UID>& src,
                            std::vector<UID>& dest,
                            bool missingIsError = true);
+void decodeKeyServersValue(RangeResult result,
+                           const ValueRef& value,
+                           std::vector<UID>& src,
+                           std::vector<UID>& dest,
+                           UID& srcID,
+                           UID& destID,
+                           bool missingIsError = true);
 void decodeKeyServersValue(std::map<Tag, UID> const& tag_uid,
                            const ValueRef& value,
                            std::vector<UID>& src,
                            std::vector<UID>& dest);
+void decodeKeyServersValue(std::map<Tag, UID> const& tag_uid,
+                           const ValueRef& value,
+                           std::vector<UID>& src,
+                           std::vector<UID>& dest,
+                           UID& srcID,
+                           UID& destID);
 
 extern const KeyRef clusterIdKey;
 
 // "\xff/checkpoint/[[UID]] := [[CheckpointMetaData]]"
+extern const KeyRangeRef checkpointKeys;
 extern const KeyRef checkpointPrefix;
 const Key checkpointKeyFor(UID checkpointID);
+const Key checkpointKeyFor(UID ssID, UID moveDataID, UID checkpointID);
+const Key checkpointKeyPrefixFor(UID ssID, UID moveDataID);
+const KeyRange checkpointKeyRangeFor(UID ssID, UID moveDataID);
+void decodeCheckpointKeyRange(const KeyRangeRef& key, UID& ssID, UID& dataMoveID);
 const Value checkpointValue(const CheckpointMetaData& checkpoint);
 UID decodeCheckpointKey(const KeyRef& key);
+void decodeCheckpointKey(const KeyRef& key, UID& ssID, UID& dataMoveID, UID& checkpointID);
 CheckpointMetaData decodeCheckpointValue(const ValueRef& value);
+
+// "\xff/dataMoves/[[UID]] := [[DataMoveMetaData]]"
+extern const KeyRangeRef dataMoveKeys;
+const Key dataMoveKeyFor(UID checkpointID);
+const Value dataMoveValue(const DataMoveMetaData& checkpoint);
+UID decodeDataMoveKey(const KeyRef& key);
+DataMoveMetaData decodeDataMoveValue(const ValueRef& value);
 
 // "\xff/storageCacheServer/[[UID]] := StorageServerInterface"
 // This will be added by the cache server on initialization and removed by DD
@@ -105,6 +137,8 @@ const Key serverKeysKey(UID serverID, const KeyRef& keys);
 const Key serverKeysPrefixFor(UID serverID);
 UID serverKeysDecodeServer(const KeyRef& key);
 bool serverHasKey(ValueRef storedValue);
+const Value serverKeysValue(const UID& id);
+void decodeServerKeysValue(const ValueRef& value, UID& id);
 
 extern const KeyRangeRef conflictingKeysRange;
 extern const ValueRef conflictingKeysTrue, conflictingKeysFalse;

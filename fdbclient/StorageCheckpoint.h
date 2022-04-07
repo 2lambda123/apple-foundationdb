@@ -47,9 +47,10 @@ struct CheckpointMetaData {
 	Version version;
 	KeyRange range;
 	int16_t format; // CheckpointFormat.
-	UID ssID; // Storage server ID on which this checkpoint is created.
-	UID checkpointID; // A unique id for this checkpoint.
 	int16_t state; // CheckpointState.
+	UID dataMoveID;
+	UID checkpointID; // A unique id for this checkpoint.
+	UID ssID; // Storage server ID on which this checkpoint is created.
 	int referenceCount; // A reference count on the checkpoint, it can only be deleted when this is 0.
 	int64_t gcTime; // Time to delete this checkpoint, a Unix timestamp in seconds.
 
@@ -58,11 +59,11 @@ struct CheckpointMetaData {
 
 	CheckpointMetaData() = default;
 	CheckpointMetaData(KeyRange const& range, CheckpointFormat format, UID const& ssID, UID const& checkpointID)
-	  : version(invalidVersion), range(range), format(format), ssID(ssID), checkpointID(checkpointID), state(Pending),
-	    referenceCount(0), gcTime(0) {}
+	  : version(invalidVersion), range(range), format(format), dataMoveID(UID()), checkpointID(checkpointID),
+	    ssID(ssID), state(Pending), referenceCount(0), gcTime(0) {}
 	CheckpointMetaData(Version version, KeyRange const& range, CheckpointFormat format, UID checkpointID)
-	  : version(version), range(range), format(format), ssID(UID()), checkpointID(checkpointID), state(Pending),
-	    referenceCount(0), gcTime(0) {}
+	  : version(version), range(range), format(format), dataMoveID(UID()), checkpointID(checkpointID),
+	    ssID(UID()), state(Pending), referenceCount(0), gcTime(0) {}
 
 	CheckpointState getState() const { return static_cast<CheckpointState>(state); }
 
@@ -74,15 +75,56 @@ struct CheckpointMetaData {
 
 	std::string toString() const {
 		std::string res = "Checkpoint MetaData:\nRange: " + range.toString() + "\nVersion: " + std::to_string(version) +
-		                  "\nFormat: " + std::to_string(format) + "\nServer: " + ssID.toString() +
-		                  "\nID: " + checkpointID.toString() + "\nState: " + std::to_string(static_cast<int>(state)) +
-		                  "\n";
+		                  "\nFormat: " + std::to_string(format) + "\nID: " + checkpointID.shortString() +
+		                  "\nDataMoveID: " + dataMoveID.shortString() + "\nServer: " + ssID.shortString() +
+		                  "\nState: " + std::to_string(static_cast<int>(state)) + "\n";
 		return res;
 	}
 
 	template <class Ar>
 	void serialize(Ar& ar) {
-		serializer(ar, version, range, format, state, checkpointID, ssID, gcTime, serializedCheckpoint);
+		serializer(ar, version, range, format, state, dataMoveID, checkpointID, ssID, gcTime, serializedCheckpoint);
+	}
+};
+
+struct DataMoveMetaData {
+	enum Phase {
+		InvalidPhase = 0,
+		Prepare= 1, // System keyspace has been modified, data move in action.
+		Running = 2, // System keyspace has been modified, data move in action.
+		Completing = 3, // Data transfer has finished, finalizing system keyspace.
+		Deleting = 4, // Data move is cancelled.
+	};
+
+	constexpr static FileIdentifier file_identifier = 13804362;
+	UID id; // A unique id for this data move.
+	Version version;
+	KeyRange range;
+	int priority;
+	std::set<UID> src;
+	std::set<UID> dest;
+	int16_t phase; // DataMoveMetaData::Phase.
+
+	DataMoveMetaData() = default;
+	DataMoveMetaData(UID id, Version version, KeyRange const& range)
+	  : id(id), version(version), range(range), priority(0) {}
+	DataMoveMetaData(UID id, KeyRange const& range) : id(id), version(invalidVersion), range(range), priority(0) {}
+
+	Phase getPhase() const { return static_cast<Phase>(phase); }
+
+	void setPhase(Phase phase) { this->phase = static_cast<int16_t>(phase); }
+
+	std::string toString() const {
+		std::string res = "DataMoveMetaData:\nID: " + id.shortString() + "\nRange: " + range.toString() +
+		                  //   "\nVersion: " + std::to_string(version) + "\nPriority: " + std::to_string(priority) +
+		                  "\nPhase: " + std::to_string(static_cast<int>(phase)) + "\nSource Servers: " + describe(src) +
+		                  "\nDestination Servers: " + describe(dest) + "\n";
+		return res;
+	}
+
+	template <class Ar>
+	void serialize(Ar& ar) {
+		serializer(ar, id, version, range, phase, src, dest);
 	}
 };
 

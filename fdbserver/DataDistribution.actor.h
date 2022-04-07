@@ -32,12 +32,44 @@
 #include "fdbclient/RunTransaction.actor.h"
 #include "flow/actorcompiler.h" // This must be the last #include.
 
+struct DDShardInfo;
+
+struct DataMove {
+	const DataMoveMetaData meta;
+	// KeyRange keys;
+	// int priority;
+	// int boundaryPriority;
+	// int healthPriority;
+	bool restore;
+	bool valid;
+
+	double startTime;
+	// UID randomId;
+	// UID dataMoveID;
+	// int workFactor;
+	std::vector<std::vector<UID>> primarySrc;
+	std::vector<std::vector<UID>> remoteSrc;
+	std::vector<UID> primaryDest;
+	std::vector<UID> remoteDest;
+
+	DataMove() : meta(DataMoveMetaData()), restore(false), startTime(-1), valid(false) {}
+	explicit DataMove(const DataMoveMetaData& meta, bool restore)
+	  : meta(meta), restore(restore), valid(true), startTime(now()) {}
+
+	void addShard(const DDShardInfo& shard);
+};
+
 struct RelocateShard {
 	KeyRange keys;
 	int priority;
+	const bool restore;
+	std::shared_ptr<DataMove> dataMove;
+	UID dataMoveId;
 
-	RelocateShard() : priority(0) {}
-	RelocateShard(KeyRange const& keys, int priority) : keys(keys), priority(priority) {}
+	RelocateShard() : priority(0), restore(false) {}
+	RelocateShard(KeyRange const& keys, int priority) : keys(keys), priority(priority), restore(false) {}
+	RelocateShard(KeyRange const& keys, int priority, bool restore)
+	  : keys(keys), priority(priority), restore(restore) {}
 };
 
 struct IDataDistributionTeam {
@@ -82,6 +114,7 @@ struct GetTeamRequest {
 	bool preferLowerUtilization;
 	bool teamMustHaveShards;
 	double inflightPenalty;
+	bool findTeamByServers;
 	std::vector<UID> completeSources;
 	std::vector<UID> src;
 	Promise<std::pair<Optional<Reference<IDataDistributionTeam>>, bool>> reply;
@@ -93,7 +126,10 @@ struct GetTeamRequest {
 	               bool teamMustHaveShards,
 	               double inflightPenalty = 1.0)
 	  : wantsNewServers(wantsNewServers), wantsTrueBest(wantsTrueBest), preferLowerUtilization(preferLowerUtilization),
-	    teamMustHaveShards(teamMustHaveShards), inflightPenalty(inflightPenalty) {}
+	    teamMustHaveShards(teamMustHaveShards), inflightPenalty(inflightPenalty), findTeamByServers(false) {}
+	GetTeamRequest(std::vector<UID> servers)
+	  : wantsNewServers(false), wantsTrueBest(false), preferLowerUtilization(false), teamMustHaveShards(false),
+	    inflightPenalty(1.0), findTeamByServers(true), src(std::move(servers)) {}
 
 	std::string getDesc() const {
 		std::stringstream ss;
@@ -222,6 +258,7 @@ struct InitialDataDistribution : ReferenceCounted<InitialDataDistribution> {
 	std::set<std::vector<UID>> remoteTeams;
 	std::vector<DDShardInfo> shards;
 	Optional<Key> initHealthyZoneValue;
+	std::vector<DataMoveMetaData> dataMoves;
 };
 
 struct ShardMetrics {

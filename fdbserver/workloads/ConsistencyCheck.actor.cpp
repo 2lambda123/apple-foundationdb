@@ -1609,28 +1609,28 @@ struct ConsistencyCheckWorkload : TestWorkload {
 
 				// If the storage servers' sampled estimate of shard size is different from ours
 				if (self->performQuiescentChecks) {
-					for (int j = 0; j < estimatedBytes.size(); j++) {
-						if (estimatedBytes[j] >= 0 && estimatedBytes[j] != sampledBytes) {
-							TraceEvent("ConsistencyCheck_IncorrectEstimate")
-							    .detail("EstimatedBytes", estimatedBytes[j])
-							    .detail("CorrectSampledBytes", sampledBytes)
-							    .detail("StorageServer", storageServers[j])
-							    .detail("IsTSS", storageServerInterfaces[j].isTss() ? "True" : "False");
+					// for (int j = 0; j < estimatedBytes.size(); j++) {
+					// 	if (estimatedBytes[j] >= 0 && estimatedBytes[j] != sampledBytes) {
+					// 		TraceEvent("ConsistencyCheck_IncorrectEstimate")
+					// 		    .detail("EstimatedBytes", estimatedBytes[j])
+					// 		    .detail("CorrectSampledBytes", sampledBytes)
+					// 		    .detail("StorageServer", storageServers[j])
+					// 		    .detail("IsTSS", storageServerInterfaces[j].isTss() ? "True" : "False");
 
-							if (!storageServerInterfaces[j].isTss()) {
-								self->testFailure("Storage servers had incorrect sampled estimate");
-							}
+					// 		if (!storageServerInterfaces[j].isTss()) {
+					// 			self->testFailure("Storage servers had incorrect sampled estimate");
+					// 		}
 
-							hasValidEstimate = false;
+					// 		hasValidEstimate = false;
 
-							break;
-						} else if (estimatedBytes[j] < 0 &&
-						           (g_network->isSimulated() || !storageServerInterfaces[j].isTss())) {
-							self->testFailure("Could not get storage metrics from server");
-							hasValidEstimate = false;
-							break;
-						}
-					}
+					// 		break;
+					// 	} else if (estimatedBytes[j] < 0 &&
+					// 	           (g_network->isSimulated() || !storageServerInterfaces[j].isTss())) {
+					// 		self->testFailure("Could not get storage metrics from server");
+					// 		hasValidEstimate = false;
+					// 		break;
+					// 	}
+					// }
 				}
 
 				// Compute the difference between the shard size estimate and its actual size.  If it is sufficiently
@@ -1665,8 +1665,8 @@ struct ConsistencyCheckWorkload : TestWorkload {
 				// Min and max shard sizes have a 3 * shardBounds.permittedError.bytes cushion for error since shard
 				// sizes are not precise Shard splits ignore the first key in a shard, so its size shouldn't be
 				// considered when checking the upper bound 0xff shards are not checked
-				if (canSplit && sampledKeys > 5 && self->performQuiescentChecks &&
-				    !range.begin.startsWith(keyServersPrefix) &&
+				if (!SERVER_KNOBS->ENABLE_PHYSICAL_SHARD_MOVE && canSplit && sampledKeys > 5 &&
+				    self->performQuiescentChecks && !range.begin.startsWith(keyServersPrefix) &&
 				    (sampledBytes < shardBounds.min.bytes - 3 * shardBounds.permittedError.bytes ||
 				     sampledBytes - firstKeySampledBytes >
 				         shardBounds.max.bytes + 3 * shardBounds.permittedError.bytes)) {

@@ -55,6 +55,10 @@ set(FDBSERVER_SRCS
   KeyValueStoreMemory.actor.cpp
   KeyValueStoreRocksDB.actor.cpp
   KeyValueStoreSQLite.actor.cpp
+  ServerCheckpoint.actor.cpp
+  ServerCheckpoint.actor.h
+  RocksDBCheckpointUtils.actor.cpp
+  RocksDBCheckpointUtils.actor.h
   KnobProtectiveGroups.cpp
   KnobProtectiveGroups.h
   Knobs.h
@@ -208,6 +212,7 @@ set(FDBSERVER_SRCS
   workloads/Cycle.actor.cpp
   workloads/DataDistributionMetrics.actor.cpp
   workloads/DataLossRecovery.actor.cpp
+  workloads/PhysicalShardMove.actor.cpp
   workloads/DDBalance.actor.cpp
   workloads/DDMetrics.actor.cpp
   workloads/DDMetricsExclude.actor.cpp

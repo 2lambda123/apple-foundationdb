@@ -546,8 +546,11 @@ private:
 		if (!m.param1.startsWith(checkpointPrefix)) {
 			return;
 		}
+
 		if (toCommit) {
 			CheckpointMetaData checkpoint = decodeCheckpointValue(m.param2);
+			UID ssID, dataMoveID, checkpointID;
+			decodeCheckpointKey(m.param1, ssID, dataMoveID, checkpointID);
 			Tag tag = decodeServerTagValue(txnStateStore->readValue(serverTagKeyFor(checkpoint.ssID)).get().get());
 			MutationRef privatized = m;
 			privatized.param1 = m.param1.withPrefix(systemKeys.begin, arena);
@@ -558,6 +561,37 @@ private:
 			    .detail("TagKey", serverTagKeyFor(checkpoint.ssID))
 			    .detail("Tag", tag.toString())
 			    .detail("Checkpoint", checkpoint.toString());
+
+			toCommit->addTag(tag);
+			toCommit->writeTypedMessage(privatized);
+		}
+	}
+
+	void checkClearCheckpointKeys(MutationRef m, KeyRangeRef range) {
+		ASSERT(m.type = MutationRef::ClearRange);
+		if (!m.param1.startsWith(checkpointPrefix)) {
+			return;
+		}
+
+		if (toCommit) {
+			UID ssID, dataMoveID, checkpointID;
+			decodeCheckpointKeyRange(range, ssID, dataMoveID);
+			// TODO: How to delete checkpoint for failed ss?
+			Optional<Value> tagV = txnStateStore->readValue(serverTagKeyFor(ssID)).get();
+			if(!tagV.present()) {
+				return;
+			}
+			Tag tag = decodeServerTagValue(tagV.get());
+			MutationRef privatized = m;
+			privatized.param1 = m.param1.withPrefix(systemKeys.begin, arena);
+			privatized.param2 = m.param2.withPrefix(systemKeys.begin, arena);
+			TraceEvent("SendingPrivateMutationDeleteCheckpoint", dbgid)
+			    .detail("Original", m)
+			    .detail("Privatized", privatized)
+			    .detail("Server", ssID)
+			    .detail("DataMoveID", dataMoveID)
+			    .detail("TagKey", serverTagKeyFor(ssID))
+			    .detail("Tag", tag.toString());
 
 			toCommit->addTag(tag);
 			toCommit->writeTypedMessage(privatized);
@@ -1125,6 +1159,7 @@ public:
 				KeyRangeRef range(m.param1, m.param2);
 
 				checkClearKeyServerKeys(range);
+				checkClearCheckpointKeys(m, range);
 				checkClearConfigKeys(m, range);
 				checkClearServerListKeys(range);
 				checkClearTagLocalityListKeys(range);

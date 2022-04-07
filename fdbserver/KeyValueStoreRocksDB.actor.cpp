@@ -829,8 +829,10 @@ ACTOR Future<Void> rocksDBMetricLogger(std::shared_ptr<rocksdb::Statistics> stat
 	}
 }
 
-void logRocksDBError(const rocksdb::Status& status, const std::string& method) {
-	auto level = status.IsTimedOut() ? SevWarn : SevError;
+void logRocksDBError(const rocksdb::Status& status,
+                     const std::string& method,
+                     Optional<Severity> sev = Optional<Severity>()) {
+	Severity level = sev.present() ? sev.get() : (status.IsTimedOut() ? SevWarn : SevError);
 	TraceEvent e(level, "RocksDBError");
 	e.detail("Error", status.ToString()).detail("Method", method).detail("RocksDBSeverity", status.severity());
 	if (status.IsIOError()) {
@@ -852,7 +854,6 @@ struct RocksDBKeyValueStore : IKeyValueStore {
 	struct Writer : IThreadPoolReceiver {
 		DB& db;
 		CF& cf;
-
 		UID id;
 		std::shared_ptr<rocksdb::RateLimiter> rateLimiter;
 		Reference<Histogram> commitLatencyHistogram;
@@ -1142,7 +1143,6 @@ struct RocksDBKeyValueStore : IKeyValueStore {
 			TraceEvent("RocksDB").detail("Path", a.path).detail("Method", "Close");
 			a.done.send(Void());
 		}
-
 		struct CheckpointAction : TypedAction<Writer, CheckpointAction> {
 			CheckpointAction(const CheckpointRequest& request) : request(request) {}
 
@@ -1181,7 +1181,8 @@ struct RocksDBKeyValueStore : IKeyValueStore {
 			                            ? latestVersion
 			                            : BinaryReader::fromStringRef<Version>(toStringRef(value), Unversioned());
 
-			TraceEvent("RocksDBServeCheckpointVersion", id)
+			ASSERT(a.request.version == version || a.request.version == latestVersion);
+			TraceEvent(SevDebug, "RocksDBServeCheckpointVersion", id)
 			    .detail("CheckpointVersion", a.request.version)
 			    .detail("PersistVersion", version);
 
@@ -1194,9 +1195,8 @@ struct RocksDBKeyValueStore : IKeyValueStore {
 				platform::eraseDirectoryRecursive(checkpointDir);
 				const std::string cwd = platform::getWorkingDirectory() + "/";
 				s = checkpoint->ExportColumnFamily(cf, checkpointDir, &pMetadata);
-
 				if (!s.ok()) {
-					logRocksDBError(s, "Checkpoint");
+					logRocksDBError(s, "ExportColumnFamily");
 					a.reply.sendError(statusToError(s));
 					return;
 				}
@@ -1206,7 +1206,26 @@ struct RocksDBKeyValueStore : IKeyValueStore {
 				TraceEvent("RocksDBServeCheckpointSuccess", id)
 				    .detail("CheckpointMetaData", res.toString())
 				    .detail("RocksDBCF", getRocksCF(res).toString());
+			} else if (a.request.format == RocksDB) {
+				platform::eraseDirectoryRecursive(checkpointDir);
+				uint64_t debugCheckpointSeq = -1;
+				s = checkpoint->CreateCheckpoint(checkpointDir, /*log_size_for_flush=*/0, &debugCheckpointSeq);
+				if (!s.ok()) {
+					logRocksDBError(s, "Checkpoint");
+					a.reply.sendError(statusToError(s));
+					return;
+				}
+
+				RocksDBCheckpoint rcp;
+				rcp.checkpointDir = checkpointDir;
+				rcp.sstFiles = platform::listFiles(checkpointDir, ".sst");
+				res.serializedCheckpoint = ObjectWriter::toValue(rcp, IncludeVersion());
+				TraceEvent("RocksDBCheckpointCreated", id)
+				    .detail("CheckpointVersion", a.request.version)
+				    .detail("RocksSequenceNumber", debugCheckpointSeq)
+				    .detail("CheckpointDir", checkpointDir);
 			} else {
+				std::cout << "1" << std::endl;
 				throw not_implemented();
 			}
 
@@ -1227,25 +1246,32 @@ struct RocksDBKeyValueStore : IKeyValueStore {
 
 		void action(RestoreAction& a) {
 			TraceEvent("RocksDBServeRestoreBegin", id).detail("Path", a.path);
+			ASSERT(db != nullptr);
 
 			// TODO: Fail gracefully.
 			ASSERT(!a.checkpoints.empty());
+			const CheckpointFormat format = a.checkpoints[0].getFormat();
+			for (int i = 1; i < a.checkpoints.size(); ++i) {
+				if (a.checkpoints[i].getFormat() != format) {
+					throw invalid_checkpoint_format();
+				}
+			}
 
-			if (a.checkpoints[0].format == RocksDBColumnFamily) {
+			rocksdb::Options options = getOptions();
+			// rocksdb::Status status = rocksdb::DB::Open(options, a.path, &db);
+			rocksdb::Status status;
+			if (!status.ok()) {
+				logRocksDBError(status, "Restore");
+				// a.done.sendError(statusToError(status));
+				// return;
+			}
+
+			if (format == RocksDBColumnFamily) {
 				ASSERT_EQ(a.checkpoints.size(), 1);
 				TraceEvent("RocksDBServeRestoreCF", id)
 				    .detail("Path", a.path)
 				    .detail("Checkpoint", a.checkpoints[0].toString())
 				    .detail("RocksDBCF", getRocksCF(a.checkpoints[0]).toString());
-
-				auto options = getOptions();
-				rocksdb::Status status = rocksdb::DB::Open(options, a.path, &db);
-
-				if (!status.ok()) {
-					logRocksDBError(status, "Restore");
-					a.done.sendError(statusToError(status));
-					return;
-				}
 
 				rocksdb::ExportImportFilesMetaData metaData = getMetaData(a.checkpoints[0]);
 				rocksdb::ImportColumnFamilyOptions importOptions;
@@ -1260,7 +1286,59 @@ struct RocksDBKeyValueStore : IKeyValueStore {
 					TraceEvent(SevInfo, "RocksDB").detail("Path", a.path).detail("Method", "Restore");
 					a.done.send(Void());
 				}
+			} else if (format == RocksDB) {
+				// status = db->CreateColumnFamily(getCFOptions(), SERVER_KNOBS->DEFAULT_FDB_ROCKSDB_COLUMN_FAMILY,
+				// &cf);
+				TraceEvent("RocksDBServeRestoreRange", id)
+				    .detail("Path", a.path)
+				    .detail("Checkpoint", describe(a.checkpoints));
+				if (!status.ok()) {
+					logRocksDBError(status, "CreateColumnFamily");
+					a.done.sendError(statusToError(status));
+					return;
+				}
+
+				std::vector<std::string> sstFiles;
+				for (const auto& checkpoint : a.checkpoints) {
+					const RocksDBCheckpoint rocksCheckpoint = getRocksCheckpoint(checkpoint);
+					for (const auto& file : rocksCheckpoint.fetchedFiles) {
+						// std::cout << "Rocks Restoring: " << file << std::endl;
+						TraceEvent("RocksDBRestoreFile", id)
+						    .detail("Checkpoint", rocksCheckpoint.toString())
+						    .detail("File", file.toString());
+						sstFiles.push_back(file.path);
+					}
+				}
+				//  =
+				//     platform::listFiles(a.checkpoint.rocksDBCheckpoint.get().checkpointDir, ".sst");
+				// std::vector<std::string> paths;
+				// for (const std::string& file : sstFiles) {
+				// 	std::cout << "Found sstFile: " << file << std::endl;
+				// 	paths.push_back(a.checkpoint.rocksDBCheckpoint.get().checkpointDir + "/" + file);
+				// }
+				if (!sstFiles.empty()) {
+					rocksdb::IngestExternalFileOptions ingestOptions;
+					ingestOptions.move_files = true;
+					ingestOptions.write_global_seqno = false;
+					ingestOptions.verify_checksums_before_ingest = true;
+					status = db->IngestExternalFile(cf, sstFiles, ingestOptions);
+					if (!status.ok()) {
+						std::cout << "Ingest sst file failure: " << status.ToString() << std::endl;
+						logRocksDBError(status, "IngestExternalFile", SevWarnAlways);
+						a.done.sendError(statusToError(status));
+						return;
+					}
+				} else {
+					TraceEvent(SevDebug, "RocksDBServeRestoreEmptyRange", id)
+					    .detail("Path", a.path)
+					    .detail("Checkpoint", describe(a.checkpoints));
+				}
+				TraceEvent("RocksDBServeRestoreEnd", id)
+				    .detail("Path", a.path)
+				    .detail("Checkpoint", describe(a.checkpoints));
+				a.done.send(Void());
 			} else {
+				std::cout << "2" << std::endl;
 				throw not_implemented();
 			}
 		}
@@ -1932,6 +2010,7 @@ struct RocksDBKeyValueStore : IKeyValueStore {
 				    .detail("Dir", dir);
 			}
 		} else if (checkpoint.format == RocksDB) {
+			std::cout << "3" << std::endl;
 			throw not_implemented();
 		} else {
 			throw internal_error();
@@ -2052,58 +2131,128 @@ TEST_CASE("noSim/fdbserver/KeyValueStoreRocksDB/RocksDBReopen") {
 	return Void();
 }
 
-TEST_CASE("noSim/fdbserver/KeyValueStoreRocksDB/CheckpointRestore") {
-	state std::string cwd = platform::getWorkingDirectory() + "/";
-	state std::string rocksDBTestDir = "rocksdb-kvstore-br-test-db";
-	platform::eraseDirectoryRecursive(rocksDBTestDir);
+// TEST_CASE("noSim/fdbserver/KeyValueStoreRocksDB/CheckpointRestoreColumnFamily") {
+// 	state std::string cwd = platform::getWorkingDirectory() + "/";
+// 	state std::string rocksDBTestDir = "rocksdb-kvstore-br-test-db";
+// 	platform::eraseDirectoryRecursive(rocksDBTestDir);
 
+// 	state IKeyValueStore* kvStore = new RocksDBKeyValueStore(rocksDBTestDir, deterministicRandom()->randomUniqueID());
+// 	wait(kvStore->init());
+
+// 	kvStore->set({ LiteralStringRef("foo"), LiteralStringRef("bar") });
+// 	wait(kvStore->commit(false));
+
+// 	Optional<Value> val = wait(kvStore->readValue(LiteralStringRef("foo")));
+// 	ASSERT(Optional<Value>(LiteralStringRef("bar")) == val);
+
+// 	state std::string rocksDBRestoreDir = "rocksdb-kvstore-br-restore-db";
+// 	platform::eraseDirectoryRecursive(rocksDBRestoreDir);
+
+// 	state IKeyValueStore* kvStoreCopy =
+// 	    new RocksDBKeyValueStore(rocksDBRestoreDir, deterministicRandom()->randomUniqueID());
+// 	wait(kvStoreCopy->init());
+
+// 	platform::eraseDirectoryRecursive("checkpoint");
+// 	state std::string checkpointDir = cwd + "checkpoint";
+
+// 	CheckpointRequest request(
+// 	    latestVersion, allKeys, RocksDBColumnFamily, deterministicRandom()->randomUniqueID(), checkpointDir);
+// 	CheckpointMetaData metaData = wait(kvStore->checkpoint(request));
+
+// 	std::vector<CheckpointMetaData> checkpoints;
+// 	checkpoints.push_back(metaData);
+// 	wait(kvStoreCopy->restore(checkpoints));
+
+// 	Optional<Value> val = wait(kvStoreCopy->readValue(LiteralStringRef("foo")));
+// 	ASSERT(Optional<Value>(LiteralStringRef("bar")) == val);
+
+// 	std::vector<Future<Void>> closes;
+// 	closes.push_back(kvStore->onClosed());
+// 	closes.push_back(kvStoreCopy->onClosed());
+// 	kvStore->close();
+// 	kvStoreCopy->close();
+// 	wait(waitForAll(closes));
+
+// 	platform::eraseDirectoryRecursive(rocksDBTestDir);
+// 	platform::eraseDirectoryRecursive(rocksDBRestoreDir);
+
+// 	return Void();
+// }
+
+TEST_CASE("noSim/fdbserver/KeyValueStoreRocksDB/CheckpointRestoreKeyValues") {
+	state std::string cwd = platform::getWorkingDirectory() + "/";
+	state std::string rocksDBTestDir = "rocksdb-kvstore-brsst-test-db";
+	platform::eraseDirectoryRecursive(rocksDBTestDir);
 	state IKeyValueStore* kvStore = new RocksDBKeyValueStore(rocksDBTestDir, deterministicRandom()->randomUniqueID());
 	wait(kvStore->init());
 
 	kvStore->set({ LiteralStringRef("foo"), LiteralStringRef("bar") });
 	wait(kvStore->commit(false));
-
 	Optional<Value> val = wait(kvStore->readValue(LiteralStringRef("foo")));
 	ASSERT(Optional<Value>(LiteralStringRef("bar")) == val);
 
 	platform::eraseDirectoryRecursive("checkpoint");
-	state std::string checkpointDir = cwd + "checkpoint";
+	std::string checkpointDir = cwd + "checkpoint";
 
-	CheckpointRequest request(
-	    latestVersion, allKeys, RocksDBColumnFamily, deterministicRandom()->randomUniqueID(), checkpointDir);
+	CheckpointRequest request(latestVersion, allKeys, RocksDB, deterministicRandom()->randomUniqueID(), checkpointDir);
 	CheckpointMetaData metaData = wait(kvStore->checkpoint(request));
 
-	state std::string rocksDBRestoreDir = "rocksdb-kvstore-br-restore-db";
-	platform::eraseDirectoryRecursive(rocksDBRestoreDir);
+	const RocksDBCheckpoint rocksCheckpoint = getRocksCheckpoint(metaData);
+	std::cout << "Created RocksDB Checkpoint in unit test:" << std::endl;
+	for (const auto& file : rocksCheckpoint.sstFiles) {
+		std::cout << file << std::endl;
+	}
 
-	state IKeyValueStore* kvStoreCopy =
-	    new RocksDBKeyValueStore(rocksDBRestoreDir, deterministicRandom()->randomUniqueID());
+	state ICheckpointReader* cpReader = newCheckpointReader(metaData, deterministicRandom()->randomUniqueID());
+	wait(cpReader->init(BinaryWriter::toValue(KeyRangeRef("foo"_sr, "foobar"_sr), IncludeVersion())));
+	loop {
+		try {
+			state RangeResult res =
+			    wait(cpReader->nextKeyValues(CLIENT_KNOBS->REPLY_BYTE_LIMIT, CLIENT_KNOBS->REPLY_BYTE_LIMIT));
+			state int i = 0;
+			for (; i < res.size(); ++i) {
+				Optional<Value> val = wait(kvStore->readValue(res[i].key));
+				ASSERT(val.present() && val.get() == res[i].value);
+				std::cout << "Key:" << res[i].key.toString() << "Value: " << res[i].value.toString() << std::endl;
+				// reply.data.push_back_deep(reply.data.arena(), res[i].key, res[i].value);
+			}
+			// for (const auto* kv = res.begin(); kv != res.end(); ++kv) {
+			// 	std::cout << "KV:" << kv->key.toString() << std::endl;
+			// 	reply.data.push_back_deep(reply.arena, *kv);
+			// }
+		} catch (Error& e) {
+			if (e.code() == error_code_end_of_stream) {
+				break;
+			} else {
+				std::cout << e.name() << std::endl;
+			}
+		}
+	}
 
-	std::vector<CheckpointMetaData> checkpoints;
-	checkpoints.push_back(metaData);
-	wait(kvStoreCopy->restore(checkpoints));
+	wait(cpReader->close());
+	// state std::string rocksDBRestoreDir = "rocksdb-kvstore-br-restore-db";
+	// platform::eraseDirectoryRecursive(rocksDBRestoreDir);
 
-	Optional<Value> val = wait(kvStoreCopy->readValue(LiteralStringRef("foo")));
-	ASSERT(Optional<Value>(LiteralStringRef("bar")) == val);
+	// state IKeyValueStore* kvStoreCopy =
+	//     new RocksDBKeyValueStore(rocksDBRestoreDir, deterministicRandom()->randomUniqueID());
+
+	// std::vector<CheckpointMetaData> checkpoints;
+	// checkpoints.push_back(metaData);
+	// wait(kvStoreCopy->restore(checkpoints));
+
+	// Optional<Value> val = wait(kvStoreCopy->readValue(LiteralStringRef("foo")));
+	// ASSERT(Optional<Value>(LiteralStringRef("bar")) == val);
 
 	std::vector<Future<Void>> closes;
 	closes.push_back(kvStore->onClosed());
-	closes.push_back(kvStoreCopy->onClosed());
+	// closes.push_back(kvStoreCopy->onClosed());
 	kvStore->close();
-	kvStoreCopy->close();
+	// kvStoreCopy->close();
 	wait(waitForAll(closes));
 
 	platform::eraseDirectoryRecursive(rocksDBTestDir);
-	platform::eraseDirectoryRecursive(rocksDBRestoreDir);
+	// platform::eraseDirectoryRecursive(rocksDBRestoreDir);
 
-	return Void();
-}
-
-TEST_CASE("noSim/fdbserver/KeyValueStoreRocksDB/RocksDBTypes") {
-	// If the following assertion fails, update SstFileMetaData and LiveFileMetaData in RocksDBCheckpointUtils.actor.h
-	// to be the same as rocksdb::SstFileMetaData and rocksdb::LiveFileMetaData.
-	ASSERT_EQ(sizeof(rocksdb::LiveFileMetaData), 184);
-	ASSERT_EQ(sizeof(rocksdb::ExportImportFilesMetaData), 32);
 	return Void();
 }
 

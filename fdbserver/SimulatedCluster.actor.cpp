@@ -1351,6 +1351,9 @@ void SimulationConfig::setSpecificConfig(const TestConfig& testConfig) {
 void SimulationConfig::setDatacenters(const TestConfig& testConfig) {
 	generateFearless =
 	    testConfig.simpleConfig ? false : (testConfig.minimumRegions > 1 || deterministicRandom()->random01() < 0.5);
+	// if (SERVER_KNOBS->ENABLE_PHYSICAL_SHARD_MOVE) {
+	// 	generateFearless = false;
+	// }
 	if (testConfig.generateFearless.present()) {
 		// overwrite whatever decision we made before
 		generateFearless = testConfig.generateFearless.get();
@@ -1381,6 +1384,17 @@ void SimulationConfig::setStorageEngine(const TestConfig& testConfig) {
 		                 storage_engine_type) != testConfig.storageEngineExcludeTypes.end()) {
 			storage_engine_type = deterministicRandom()->randomInt(0, 5);
 		}
+	}
+
+	if (std::find(testConfig.storageEngineExcludeTypes.begin(), testConfig.storageEngineExcludeTypes.end(), 4) ==
+	    testConfig.storageEngineExcludeTypes.end()) {
+		storage_engine_type = 4;
+	}
+
+	if (storage_engine_type != 4) {
+		IKnobCollection::getMutableGlobalKnobCollection().setKnob("enable_physical_shard_move",
+		                                                          KnobValueRef::create(bool{ false }));
+		TraceEvent(SevDebug, "DisaablePhysicalShardMove").log();
 	}
 
 	switch (storage_engine_type) {
@@ -1753,7 +1767,8 @@ void SimulationConfig::setProcessesPerMachine(const TestConfig& testConfig) {
 // Also configures the cluster behaviour through setting some flags on the simulator.
 void SimulationConfig::setTss(const TestConfig& testConfig) {
 	int tssCount = 0;
-	if (!testConfig.simpleConfig && !testConfig.disableTss && deterministicRandom()->random01() < 0.25) {
+	if (!SERVER_KNOBS->ENABLE_PHYSICAL_SHARD_MOVE && !testConfig.simpleConfig && !testConfig.disableTss &&
+	    deterministicRandom()->random01() < 0.25) {
 		// 1 or 2 tss
 		tssCount = deterministicRandom()->randomInt(1, 3);
 	}
@@ -2364,6 +2379,7 @@ ACTOR void setupAndRun(std::string dataFolder,
 	// TODO: reenable when backup/DR or BlobGranule supports tenants.
 	if (std::string_view(testFile).find("Backup") != std::string_view::npos ||
 	    std::string_view(testFile).find("BlobGranule") != std::string_view::npos || testConfig.extraDB != 0) {
+		testConfig.storageEngineExcludeTypes.push_back(4);
 		allowDefaultTenant = false;
 	}
 
@@ -2403,6 +2419,10 @@ ACTOR void setupAndRun(std::string dataFolder,
 
 	state Optional<TenantName> defaultTenant;
 	state TenantMode tenantMode = TenantMode::DISABLED;
+
+	// if (SERVER_KNOBS->ENABLE_PHYSICAL_SHARD_MOVE) {
+	// 	allowDefaultTenant = false;
+	// }
 	if (allowDefaultTenant && deterministicRandom()->random01() < 0.5) {
 		defaultTenant = "SimulatedDefaultTenant"_sr;
 		if (deterministicRandom()->random01() < 0.9) {
@@ -2413,6 +2433,9 @@ ACTOR void setupAndRun(std::string dataFolder,
 	} else if (!allowDisablingTenants || deterministicRandom()->random01() < 0.5) {
 		tenantMode = TenantMode::OPTIONAL_TENANT;
 	}
+	// if (SERVER_KNOBS->ENABLE_PHYSICAL_SHARD_MOVE) {
+	// 	tenantMode = TenantMode::DISABLED;
+	// }
 
 	TraceEvent("SimulatedClusterTenantMode")
 	    .detail("UsingTenant", defaultTenant)

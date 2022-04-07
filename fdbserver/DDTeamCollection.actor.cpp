@@ -147,6 +147,18 @@ public:
 		return Void();
 	}
 
+	static void getTeamByServers(DDTeamCollection* self, GetTeamRequest req) {
+		const std::string servers = TCTeamInfo::serversToString(req.src);
+		Optional<Reference<IDataDistributionTeam>> res;
+		for (const auto& team : self->teams) {
+			if (team->getServerIDsStr() == servers) {
+				res = team;
+				break;
+			}
+		}
+		req.reply.send(std::make_pair(res, false));
+	}
+
 	// SOMEDAY: Make bestTeam better about deciding to leave a shard where it is (e.g. in PRIORITY_TEAM_HEALTHY case)
 	//		    use keys, src, dest, metrics, priority, system load, etc.. to decide...
 	ACTOR static Future<Void> getTeam(DDTeamCollection* self, GetTeamRequest req) {
@@ -466,7 +478,7 @@ public:
 		for (auto& server : initTeams->allServers) {
 			if (self->shouldHandleServer(server.first)) {
 				if (!self->isValidLocality(self->configuration.storagePolicy, server.first.locality)) {
-					TraceEvent(SevWarnAlways, "MissingLocality")
+					TraceEvent(SevWarnAlways, "MissingLocalit")
 					    .detail("Server", server.first.uniqueID)
 					    .detail("Locality", server.first.locality.toString());
 					auto addr = server.first.stableAddress();
@@ -476,6 +488,7 @@ public:
 						self->addActor.send(self->checkInvalidLocalities);
 					}
 				}
+				TraceEvent(SevDebug, "DDTeamCollectionInitAddServer").detail("Server", server.first.id());
 				self->addServer(server.first, server.second, self->serverTrackerErrorOut, 0, *ddEnabledState);
 			}
 		}
@@ -2394,6 +2407,7 @@ public:
 				UID id = newServer.get().interf.id();
 				if (!self->server_and_tss_info.count(id)) {
 					if (!recruitTss || tssState->tssRecruitSuccess()) {
+						TraceEvent(SevDebug, "DDRecruitingAddServer").detail("Server", newServer.get().interf.id());
 						self->addServer(newServer.get().interf,
 						                candidateWorker.processClass,
 						                self->serverTrackerErrorOut,
@@ -2701,7 +2715,11 @@ public:
 	ACTOR static Future<Void> serverGetTeamRequests(DDTeamCollection* self, TeamCollectionInterface tci) {
 		loop {
 			GetTeamRequest req = waitNext(tci.getTeam.getFuture());
-			self->addActor.send(self->getTeam(req));
+			if (req.findTeamByServers) {
+				getTeamByServers(self, req);
+			} else {
+				self->addActor.send(self->getTeam(req));
+			}
 		}
 	}
 
@@ -2775,6 +2793,7 @@ public:
 									currentInterfaceChanged.send(std::make_pair(ssi, processClass));
 								}
 							} else if (!self->recruitingIds.count(ssi.id())) {
+								TraceEvent(SevDebug, "DDServerListChangeAddServer").detail("Server", ssi.id());
 								self->addServer(ssi,
 								                processClass,
 								                self->serverTrackerErrorOut,
@@ -2896,6 +2915,7 @@ public:
 		if (self->storageWiggler->contains(server->getId())) {
 			self->storageWiggler->updateMetadata(server->getId(), data);
 		} else {
+			TraceEvent("ReadOrCreateStorageServerAddServer").detail("Server", server->getId());
 			self->storageWiggler->addServer(server->getId(), data);
 		}
 
@@ -3708,7 +3728,18 @@ bool DDTeamCollection::isValidLocality(Reference<IReplicationPolicy> storagePoli
 void DDTeamCollection::evaluateTeamQuality() const {
 	int teamCount = teams.size(), serverCount = allServers.size();
 	double teamsPerServer = (double)teamCount * configuration.storageTeamSize / serverCount;
-
+	if (serverCount != server_info.size()) {
+		std::vector<UID> serversAllServers(allServers);
+		std::vector<UID> serversServerInfo;
+		for (const auto& [id, _] : server_info) {
+			serversServerInfo.push_back(id);
+		}
+		std::sort(serversAllServers.begin(), serversAllServers.end());
+		std::sort(serversServerInfo.begin(), serversServerInfo.end());
+		TraceEvent("ServerDiff")
+		    .detail("AllServers", describe(serversAllServers))
+		    .detail("ServerInfo", describe(serversServerInfo));
+	}
 	ASSERT_EQ(serverCount, server_info.size());
 
 	int minTeams = std::numeric_limits<int>::max();

@@ -88,6 +88,7 @@ struct StorageServerInterface {
 	RequestStream<struct ChangeFeedVersionUpdateRequest> changeFeedVersionUpdate;
 	RequestStream<struct GetCheckpointRequest> checkpoint;
 	RequestStream<struct FetchCheckpointRequest> fetchCheckpoint;
+	RequestStream<struct FetchCheckpointKeyValuesRequest> fetchCheckpointKeyValues;
 
 private:
 	bool acceptingRequests;
@@ -154,6 +155,8 @@ public:
 				checkpoint = RequestStream<struct GetCheckpointRequest>(getValue.getEndpoint().getAdjustedEndpoint(19));
 				fetchCheckpoint =
 				    RequestStream<struct FetchCheckpointRequest>(getValue.getEndpoint().getAdjustedEndpoint(20));
+				fetchCheckpointKeyValues = RequestStream<struct FetchCheckpointKeyValuesRequest>(
+				    getValue.getEndpoint().getAdjustedEndpoint(21));
 			}
 		} else {
 			ASSERT(Ar::isDeserializing);
@@ -203,6 +206,7 @@ public:
 		streams.push_back(changeFeedVersionUpdate.getReceiver());
 		streams.push_back(checkpoint.getReceiver());
 		streams.push_back(fetchCheckpoint.getReceiver());
+		streams.push_back(fetchCheckpointKeyValues.getReceiver());
 		FlowTransport::transport().addEndpoints(streams);
 	}
 };
@@ -264,12 +268,12 @@ struct GetValueReply : public LoadBalancedReply {
 struct GetValueRequest : TimedRequest {
 	constexpr static FileIdentifier file_identifier = 8454530;
 	SpanID spanContext;
-	TenantInfo tenantInfo;
 	Key key;
 	Version version;
 	Optional<TagSet> tags;
 	Optional<UID> debugID;
 	ReplyPromise<GetValueReply> reply;
+	TenantInfo tenantInfo;
 
 	GetValueRequest() {}
 	GetValueRequest(SpanID spanContext,
@@ -554,13 +558,16 @@ struct GetShardStateRequest {
 
 	KeyRange keys;
 	int32_t mode;
+	Version version;
 	ReplyPromise<GetShardStateReply> reply;
 	GetShardStateRequest() {}
 	GetShardStateRequest(KeyRange const& keys, waitMode mode) : keys(keys), mode(mode) {}
+	GetShardStateRequest(KeyRange const& keys, waitMode mode, Version version)
+	  : keys(keys), mode(mode), version(version) {}
 
 	template <class Ar>
 	void serialize(Ar& ar) {
-		serializer(ar, keys, mode, reply);
+		serializer(ar, keys, mode, version, reply);
 	}
 };
 
@@ -894,6 +901,37 @@ struct FetchCheckpointRequest {
 	template <class Ar>
 	void serialize(Ar& ar) {
 		serializer(ar, checkpointID, token, reply);
+	}
+};
+
+//
+struct FetchCheckpointKeyValuesStreamReply : public ReplyPromiseStreamReply {
+	constexpr static FileIdentifier file_identifier = 13804353;
+	Arena arena;
+	VectorRef<KeyValueRef> data;
+
+	FetchCheckpointKeyValuesStreamReply() {}
+
+	int expectedSize() const { return data.expectedSize(); }
+
+	template <class Ar>
+	void serialize(Ar& ar) {
+		serializer(ar, ReplyPromiseStreamReply::acknowledgeToken, ReplyPromiseStreamReply::sequence, data, arena);
+	}
+};
+
+struct FetchCheckpointKeyValuesRequest {
+	constexpr static FileIdentifier file_identifier = 13804354;
+	UID checkpointID;
+	KeyRange range;
+	ReplyPromiseStream<FetchCheckpointKeyValuesStreamReply> reply;
+
+	FetchCheckpointKeyValuesRequest() {}
+	FetchCheckpointKeyValuesRequest(UID checkpointID, KeyRange range) : checkpointID(checkpointID), range(range) {}
+
+	template <class Ar>
+	void serialize(Ar& ar) {
+		serializer(ar, checkpointID, range, reply);
 	}
 };
 

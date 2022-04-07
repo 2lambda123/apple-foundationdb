@@ -5387,6 +5387,7 @@ void Transaction::set(const KeyRef& key, const ValueRef& value, AddConflictRange
 	auto r = singleKeyRange(key, req.arena);
 	auto v = ValueRef(req.arena, value);
 	t.mutations.emplace_back(req.arena, MutationRef::SetValue, r.begin, v);
+	// TraceEvent("TransactionSet").detail("Key", r.begin);
 
 	if (addConflictRange) {
 		t.write_conflict_ranges.push_back(req.arena, r);
@@ -6135,6 +6136,7 @@ Future<Void> Transaction::commitMutations() {
 			    tr.arena, tr.transaction.write_conflict_ranges.begin(), tr.transaction.write_conflict_ranges.size());
 		}
 
+		// {
 		if (trState->options.debugDump) {
 			UID u = nondeterministicRandom()->randomUniqueID();
 			TraceEvent("TransactionDump", u).log();
@@ -7956,8 +7958,10 @@ ACTOR Future<std::vector<CheckpointMetaData>> getCheckpointMetaData(Database cx,
 
 			futures.clear();
 			for (index = 0; index < locations.size(); ++index) {
-				futures.push_back(getCheckpointMetaDataInternal(
-				    GetCheckpointRequest(version, keys, format), locations[index].locations, timeout));
+				futures.push_back(
+				    getCheckpointMetaDataInternal(GetCheckpointRequest(version, locations[index].range, format),
+				                                  locations[index].locations,
+				                                  timeout));
 				TraceEvent("GetCheckpointShardBegin")
 				    .detail("Range", locations[index].range)
 				    .detail("Version", version)

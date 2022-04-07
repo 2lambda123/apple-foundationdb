@@ -42,9 +42,11 @@ struct RelocateData {
 	int priority;
 	int boundaryPriority;
 	int healthPriority;
+	bool restore;
 
 	double startTime;
 	UID randomId;
+	UID dataMoveID;
 	int workFactor;
 	std::vector<UID> src;
 	std::vector<UID> completeSources;
@@ -52,19 +54,25 @@ struct RelocateData {
 	bool wantsNewServers;
 	bool cancellable;
 	TraceInterval interval;
+	std::shared_ptr<DataMove> dataMove;
 
 	RelocateData()
-	  : priority(-1), boundaryPriority(-1), healthPriority(-1), startTime(-1), workFactor(0), wantsNewServers(false),
-	    cancellable(false), interval("QueuedRelocation") {}
+	  : priority(-1), boundaryPriority(-1), healthPriority(-1), restore(false), startTime(-1), workFactor(0),
+	    wantsNewServers(false), cancellable(false), interval("QueuedRelocation") {}
 	explicit RelocateData(RelocateShard const& rs)
 	  : keys(rs.keys), priority(rs.priority), boundaryPriority(isBoundaryPriority(rs.priority) ? rs.priority : -1),
-	    healthPriority(isHealthPriority(rs.priority) ? rs.priority : -1), startTime(now()),
-	    randomId(deterministicRandom()->randomUniqueID()), workFactor(0),
+	    healthPriority(isHealthPriority(rs.priority) ? rs.priority : -1), startTime(now()), restore(rs.restore),
+	    randomId(deterministicRandom()->randomUniqueID()), dataMoveID(rs.dataMoveId), workFactor(0),
+	    // src(rs.dataMove.present() ? rs.dataMove.get().src : std::vector<UID>()),
 	    wantsNewServers(rs.priority == SERVER_KNOBS->PRIORITY_REBALANCE_OVERUTILIZED_TEAM ||
 	                    rs.priority == SERVER_KNOBS->PRIORITY_REBALANCE_UNDERUTILIZED_TEAM ||
 	                    rs.priority == SERVER_KNOBS->PRIORITY_SPLIT_SHARD ||
 	                    rs.priority == SERVER_KNOBS->PRIORITY_TEAM_REDUNDANT),
-	    cancellable(true), interval("QueuedRelocation") {}
+	    cancellable(true), interval("QueuedRelocation"), dataMove(rs.dataMove) {
+		if (dataMove != nullptr && restore) {
+			this->src.insert(this->src.end(), dataMove->meta.src.begin(), dataMove->meta.src.end());
+		}
+	}
 
 	static bool isHealthPriority(int priority) {
 		return priority == SERVER_KNOBS->PRIORITY_POPULATE_REGION ||
@@ -89,7 +97,8 @@ struct RelocateData {
 		return priority == rhs.priority && boundaryPriority == rhs.boundaryPriority &&
 		       healthPriority == rhs.healthPriority && keys == rhs.keys && startTime == rhs.startTime &&
 		       workFactor == rhs.workFactor && src == rhs.src && completeSources == rhs.completeSources &&
-		       completeDests == rhs.completeDests && wantsNewServers == rhs.wantsNewServers && randomId == rhs.randomId;
+		       completeDests == rhs.completeDests && wantsNewServers == rhs.wantsNewServers &&
+		       randomId == rhs.randomId && dataMoveID == rhs.dataMoveID;
 	}
 	bool operator!=(const RelocateData& rhs) const { return !(*this == rhs); }
 };
@@ -397,8 +406,11 @@ void complete(RelocateData const& relocation, std::map<UID, Busyness>& busymap, 
 	}
 }
 
+ACTOR Future<Void> cancelDataMove(struct DDQueueData* self, KeyRange range, const DDEnabledState* ddEnabledState);
+
 ACTOR Future<Void> dataDistributionRelocator(struct DDQueueData* self,
                                              RelocateData rd,
+                                             Future<Void> prevCleanup,
                                              const DDEnabledState* ddEnabledState);
 
 struct DDQueueData {
@@ -433,6 +445,7 @@ struct DDQueueData {
 	KeyRangeMap<RelocateData> inFlight;
 	// Track all actors that relocates specified keys to a good place; Key: keyRange; Value: actor
 	KeyRangeActorMap inFlightActors;
+	KeyRangeMap<UID> dataMoves;
 
 	Promise<Void> error;
 	PromiseStream<RelocateData> dataTransferComplete;
@@ -937,6 +950,8 @@ struct DDQueueData {
 			bool overlappingInFlight = false;
 			auto intersectingInFlight = inFlight.intersectingRanges(rd.keys);
 			for (auto it = intersectingInFlight.begin(); it != intersectingInFlight.end(); ++it) {
+				// FetchKeys has completed, and the actor is live, e.g., working on finishMoveKeys().
+				// They are partially overlapping, and the existing one's priority is not lower.
 				if (fetchKeysComplete.count(it->value()) && inFlightActors.liveActorAt(it->range().begin) &&
 				    !rd.keys.contains(it->range()) && it->value().priority >= rd.priority &&
 				    rd.healthPriority < SERVER_KNOBS->PRIORITY_TEAM_UNHEALTHY) {
@@ -951,11 +966,12 @@ struct DDQueueData {
 
 			if (overlappingInFlight) {
 				// logRelocation( rd, "SkippingOverlappingInFlight" );
+				ASSERT(!rd.restore);
 				continue;
 			}
 
 			// Because the busyness of a server is decreased when a superseding relocation is issued, we
-			//  need to consider what the busyness of a server WOULD be if
+			// need to consider what the busyness of a server WOULD be if
 			auto containedRanges = inFlight.containedRanges(rd.keys);
 			std::vector<RelocateData> cancellableRelocations;
 			for (auto it = containedRanges.begin(); it != containedRanges.end(); ++it) {
@@ -968,7 +984,7 @@ struct DDQueueData {
 			// SOMEDAY: the list of source servers may be outdated since they were fetched when the work was put in the
 			// queue
 			// FIXME: we need spare capacity even when we're just going to be cancelling work via TEAM_HEALTHY
-			if (!canLaunchSrc(rd, teamSize, singleRegionTeamSize, busymap, cancellableRelocations)) {
+			if (!rd.restore && !canLaunchSrc(rd, teamSize, singleRegionTeamSize, busymap, cancellableRelocations)) {
 				// logRelocation( rd, "SkippingQueuedRelocation" );
 				continue;
 			}
@@ -979,13 +995,18 @@ struct DDQueueData {
 			// logRelocation( rd, "LaunchingRelocation" );
 
 			//TraceEvent(rd.interval.end(), distributorId).detail("Result","Success");
-			queuedRelocations--;
-			finishRelocation(rd.priority, rd.healthPriority);
+			if (!rd.restore) {
+				queuedRelocations--;
+				finishRelocation(rd.priority, rd.healthPriority);
 
-			// now we are launching: remove this entry from the queue of all the src servers
-			for (int i = 0; i < rd.src.size(); i++) {
-				ASSERT(queue[rd.src[i]].erase(rd));
+				// now we are launching: remove this entry from the queue of all the src servers
+				for (int i = 0; i < rd.src.size(); i++) {
+					ASSERT(queue[rd.src[i]].erase(rd));
+				}
 			}
+
+			Future<Void> fCleanup =
+			    SERVER_KNOBS->ENABLE_PHYSICAL_SHARD_MOVE ? cancelDataMove(this, rd.keys, ddEnabledState) : Void();
 
 			// If there is a job in flight that wants data relocation which we are about to cancel/modify,
 			//     make sure that we keep the relocation intent for the job that we launch
@@ -1002,15 +1023,22 @@ struct DDQueueData {
 			inFlightActors.getRangesAffectedByInsertion(rd.keys, ranges);
 			inFlightActors.cancel(KeyRangeRef(ranges.front().begin, ranges.back().end));
 			inFlight.insert(rd.keys, rd);
+
 			for (int r = 0; r < ranges.size(); r++) {
 				RelocateData& rrs = inFlight.rangeContaining(ranges[r].begin)->value();
 				rrs.keys = ranges[r];
+				if (rd.keys == ranges[r] && rd.restore) {
+					ASSERT(rd.dataMove != nullptr);
+					rrs.dataMoveID = rd.dataMove->meta.id;
+				} else {
+					rrs.dataMoveID = deterministicRandom()->randomUniqueID();
+				}
 
 				launch(rrs, busymap, singleRegionTeamSize);
 				activeRelocations++;
 				startRelocation(rrs.priority, rrs.healthPriority);
 				// Start the actor that relocates data in the rrs.keys
-				inFlightActors.insert(rrs.keys, dataDistributionRelocator(this, rrs, ddEnabledState));
+				inFlightActors.insert(rrs.keys, dataDistributionRelocator(this, rrs, fCleanup, ddEnabledState));
 			}
 
 			// logRelocation( rd, "LaunchedRelocation" );
@@ -1029,6 +1057,32 @@ struct DDQueueData {
 	}
 };
 
+ACTOR Future<Void> cancelDataMove(struct DDQueueData* self, KeyRange range, const DDEnabledState* ddEnabledState) {
+	ASSERT(SERVER_KNOBS->ENABLE_PHYSICAL_SHARD_MOVE);
+
+	std::vector<Future<Void>> cleanup;
+	auto f = self->dataMoves.intersectingRanges(range);
+	std::unordered_set<UID> dms;
+	for (auto it = f.begin(); it != f.end(); ++it) {
+		if (!it->value().isValid()) {
+			continue;
+		}
+		KeyRange keys = KeyRangeRef(it->range().begin, it->range().end);
+		TraceEvent(SevDebug, "DDQueueCancelDataMove", self->distributorId)
+		    .detail("DataMoveID", it->value())
+		    .detail("Range", keys);
+		auto [iter, inserted] = dms.insert(it->value());
+		ASSERT(inserted);
+		cleanup.push_back(cleanUpDataMove(self->cx, it->value(), self->lock, keys, true, ddEnabledState));
+	}
+	wait(waitForAll(cleanup));
+	auto ranges = self->dataMoves.getAffectedRangesAfterInsertion(range);
+	if (!ranges.empty()) {
+		self->dataMoves.insert(KeyRangeRef(ranges.front().begin, ranges.back().end), UID());
+	}
+	return Void();
+}
+
 static std::string destServersString(std::vector<std::pair<Reference<IDataDistributionTeam>, bool>> const& bestTeams) {
 	std::stringstream ss;
 
@@ -1043,7 +1097,10 @@ static std::string destServersString(std::vector<std::pair<Reference<IDataDistri
 
 // This actor relocates the specified keys to a good place.
 // The inFlightActor key range map stores the actor for each RelocateData
-ACTOR Future<Void> dataDistributionRelocator(DDQueueData* self, RelocateData rd, const DDEnabledState* ddEnabledState) {
+ACTOR Future<Void> dataDistributionRelocator(DDQueueData* self,
+                                             RelocateData rd,
+                                             Future<Void> prevCleanup,
+                                             const DDEnabledState* ddEnabledState) {
 	state Promise<Void> errorOut(self->error);
 	state TraceInterval relocateShardInterval("RelocateShard");
 	state PromiseStream<RelocateData> dataTransferComplete(self->dataTransferComplete);
@@ -1080,10 +1137,37 @@ ACTOR Future<Void> dataDistributionRelocator(DDQueueData* self, RelocateData rd,
 			self->suppressIntervals = 0;
 		}
 
+		wait(prevCleanup);
+		if (SERVER_KNOBS->ENABLE_PHYSICAL_SHARD_MOVE) {
+			auto inFlightRange = self->inFlight.rangeContaining(rd.keys.begin);
+			ASSERT(inFlightRange.range() == rd.keys);
+			ASSERT(inFlightRange.value().randomId == rd.randomId);
+			inFlightRange.value().cancellable = false;
+
+			auto f = self->dataMoves.intersectingRanges(rd.keys);
+			for (auto it = f.begin(); it != f.end(); ++it) {
+				KeyRangeRef kr(it->range().begin, it->range().end);
+				const UID mId = it->value();
+				if (mId.isValid() && mId != rd.dataMoveID) {
+					TraceEvent("DDRelocatorConflictingDataMove", distributorId)
+					    .detail("CurrentDataMoveID", rd.dataMoveID)
+					    .detail("DataMoveID", mId)
+					    .detail("Range", kr);
+					if (!signalledTransferComplete) {
+						dataTransferComplete.send(rd);
+					}
+					relocationComplete.send(rd);
+					return Void();
+				}
+			}
+			self->dataMoves.insert(rd.keys, rd.dataMoveID);
+		}
+
 		state StorageMetrics metrics =
 		    wait(brokenPromiseToNever(self->getShardMetrics.getReply(GetMetricsRequest(rd.keys))));
 
-		ASSERT(rd.src.size());
+		ASSERT(!rd.src.empty());
+
 		loop {
 			destOverloadedCount = 0;
 			stuckCount = 0;
@@ -1091,6 +1175,7 @@ ACTOR Future<Void> dataDistributionRelocator(DDQueueData* self, RelocateData rd,
 			loop {
 				state int tciIndex = 0;
 				state bool foundTeams = true;
+				state bool bestTeamReady = false;
 				anyHealthy = false;
 				allHealthy = true;
 				anyWithSource = false;
@@ -1098,54 +1183,79 @@ ACTOR Future<Void> dataDistributionRelocator(DDQueueData* self, RelocateData rd,
 				bestTeams.clear();
 				// Get team from teamCollections in different DCs and find the best one
 				while (tciIndex < self->teamCollections.size()) {
-					double inflightPenalty = SERVER_KNOBS->INFLIGHT_PENALTY_HEALTHY;
-					if (rd.healthPriority == SERVER_KNOBS->PRIORITY_TEAM_UNHEALTHY ||
-					    rd.healthPriority == SERVER_KNOBS->PRIORITY_TEAM_2_LEFT)
-						inflightPenalty = SERVER_KNOBS->INFLIGHT_PENALTY_UNHEALTHY;
-					if (rd.healthPriority == SERVER_KNOBS->PRIORITY_POPULATE_REGION ||
-					    rd.healthPriority == SERVER_KNOBS->PRIORITY_TEAM_1_LEFT ||
-					    rd.healthPriority == SERVER_KNOBS->PRIORITY_TEAM_0_LEFT)
-						inflightPenalty = SERVER_KNOBS->INFLIGHT_PENALTY_ONE_LEFT;
-
-					auto req = GetTeamRequest(rd.wantsNewServers,
-					                          rd.priority == SERVER_KNOBS->PRIORITY_REBALANCE_UNDERUTILIZED_TEAM,
-					                          true,
-					                          false,
-					                          inflightPenalty);
-					req.src = rd.src;
-					req.completeSources = rd.completeSources;
-					// bestTeam.second = false if the bestTeam in the teamCollection (in the DC) does not have any
-					// server that hosts the relocateData. This is possible, for example, in a fearless configuration
-					// when the remote DC is just brought up.
-					Future<std::pair<Optional<Reference<IDataDistributionTeam>>, bool>> fbestTeam =
-					    brokenPromiseToNever(self->teamCollections[tciIndex].getTeam.getReply(req));
-					state bool bestTeamReady = fbestTeam.isReady();
-					std::pair<Optional<Reference<IDataDistributionTeam>>, bool> bestTeam = wait(fbestTeam);
-					if (tciIndex > 0 && !bestTeamReady) {
-						// self->shardsAffectedByTeamFailure->moveShard must be called without any waits after getting
-						// the destination team or we could miss failure notifications for the storage servers in the
-						// destination team
-						TraceEvent("BestTeamNotReady");
-						foundTeams = false;
-						break;
-					}
-					// If a DC has no healthy team, we stop checking the other DCs until
-					// the unhealthy DC is healthy again or is excluded.
-					if (!bestTeam.first.present()) {
-						foundTeams = false;
-						break;
-					}
-					if (!bestTeam.first.get()->isHealthy()) {
-						allHealthy = false;
-					} else {
+					if (SERVER_KNOBS->ENABLE_PHYSICAL_SHARD_MOVE && rd.restore) {
+						auto req = GetTeamRequest(tciIndex == 0 ? rd.dataMove->primaryDest : rd.dataMove->remoteDest);
+						Future<std::pair<Optional<Reference<IDataDistributionTeam>>, bool>> fbestTeam =
+						    brokenPromiseToNever(self->teamCollections[tciIndex].getTeam.getReply(req));
+						bestTeamReady = fbestTeam.isReady();
+						std::pair<Optional<Reference<IDataDistributionTeam>>, bool> bestTeam = wait(fbestTeam);
+						if (tciIndex > 0 && !bestTeamReady) {
+							// self->shardsAffectedByTeamFailure->moveShard must be called without any waits after
+							// getting the destination team or we could miss failure notifications for the storage
+							// servers in the destination team
+							TraceEvent("BestTeamNotReady")
+							    .detail("TeamCollectionIndex", tciIndex)
+							    .detail("RestoreDataMoveForDest",
+							            describe(tciIndex == 0 ? rd.dataMove->primaryDest : rd.dataMove->remoteDest));
+							foundTeams = false;
+							break;
+						}
+						if (!bestTeam.first.present()) {
+							foundTeams = false;
+							break;
+						}
 						anyHealthy = true;
-					}
+						bestTeams.emplace_back(bestTeam.first.get(), bestTeam.second);
+					} else {
+						double inflightPenalty = SERVER_KNOBS->INFLIGHT_PENALTY_HEALTHY;
+						if (rd.healthPriority == SERVER_KNOBS->PRIORITY_TEAM_UNHEALTHY ||
+						    rd.healthPriority == SERVER_KNOBS->PRIORITY_TEAM_2_LEFT)
+							inflightPenalty = SERVER_KNOBS->INFLIGHT_PENALTY_UNHEALTHY;
+						if (rd.healthPriority == SERVER_KNOBS->PRIORITY_POPULATE_REGION ||
+						    rd.healthPriority == SERVER_KNOBS->PRIORITY_TEAM_1_LEFT ||
+						    rd.healthPriority == SERVER_KNOBS->PRIORITY_TEAM_0_LEFT)
+							inflightPenalty = SERVER_KNOBS->INFLIGHT_PENALTY_ONE_LEFT;
 
-					if (bestTeam.second) {
-						anyWithSource = true;
-					}
+						auto req = GetTeamRequest(rd.wantsNewServers,
+						                          rd.priority == SERVER_KNOBS->PRIORITY_REBALANCE_UNDERUTILIZED_TEAM,
+						                          true,
+						                          false,
+						                          inflightPenalty);
+						req.src = rd.src;
+						req.completeSources = rd.completeSources;
+						// bestTeam.second = false if the bestTeam in the teamCollection (in the DC) does not have any
+						// server that hosts the relocateData. This is possible, for example, in a fearless
+						// configuration when the remote DC is just brought up.
+						Future<std::pair<Optional<Reference<IDataDistributionTeam>>, bool>> fbestTeam =
+						    brokenPromiseToNever(self->teamCollections[tciIndex].getTeam.getReply(req));
+						bestTeamReady = fbestTeam.isReady();
+						std::pair<Optional<Reference<IDataDistributionTeam>>, bool> bestTeam = wait(fbestTeam);
+						if (tciIndex > 0 && !bestTeamReady) {
+							// self->shardsAffectedByTeamFailure->moveShard must be called without any waits after
+							// getting the destination team or we could miss failure notifications for the storage
+							// servers in the destination team
+							TraceEvent("BestTeamNotReady");
+							foundTeams = false;
+							break;
+						}
+						// If a DC has no healthy team, we stop checking the other DCs until
+						// the unhealthy DC is healthy again or is excluded.
+						if (!bestTeam.first.present()) {
+							foundTeams = false;
+							break;
+						}
+						if (!bestTeam.first.get()->isHealthy()) {
+							allHealthy = false;
+						} else {
+							anyHealthy = true;
+						}
 
-					bestTeams.emplace_back(bestTeam.first.get(), bestTeam.second);
+						if (bestTeam.second) {
+							anyWithSource = true;
+						}
+
+						bestTeams.emplace_back(bestTeam.first.get(), bestTeam.second);
+					}
 					tciIndex++;
 				}
 				// once we've found healthy candidate teams, make sure they're not overloaded with outstanding moves
@@ -1200,7 +1310,7 @@ ACTOR Future<Void> dataDistributionRelocator(DDQueueData* self, RelocateData rd,
 				auto& serverIds = bestTeams[i].first->getServerIDs();
 				destinationTeams.push_back(ShardsAffectedByTeamFailure::Team(serverIds, i == 0));
 
-				if (allHealthy && anyWithSource && !bestTeams[i].second) {
+				if (allHealthy && anyWithSource && !bestTeams[i].second && !SERVER_KNOBS->ENABLE_PHYSICAL_SHARD_MOVE) {
 					// When all servers in bestTeams[i] do not hold the shard (!bestTeams[i].second), it indicates
 					// the bestTeams[i] is in a new DC where data has not been replicated to.
 					// To move data (specified in RelocateShard) to bestTeams[i] in the new DC AND reduce data movement
@@ -1278,6 +1388,8 @@ ACTOR Future<Void> dataDistributionRelocator(DDQueueData* self, RelocateData rd,
 			                                         &self->finishMoveKeysParallelismLock,
 			                                         self->teamCollections.size() > 1,
 			                                         relocateShardInterval.pairID,
+			                                         rd.dataMoveID,
+													 false,
 			                                         ddEnabledState);
 			state Future<Void> pollHealth =
 			    signalledTransferComplete ? Never()
@@ -1301,9 +1413,24 @@ ACTOR Future<Void> dataDistributionRelocator(DDQueueData* self, RelocateData rd,
 								                      &self->finishMoveKeysParallelismLock,
 								                      self->teamCollections.size() > 1,
 								                      relocateShardInterval.pairID,
+								                      rd.dataMoveID,
+													  false,
 								                      ddEnabledState);
 							} else {
 								self->fetchKeysComplete.insert(rd);
+								// if (SERVER_KNOBS->ENABLE_PHYSICAL_SHARD_MOVE) {
+								// 	auto f = self->dataMoves.intersectingRanges(rd.keys);
+								// 	for (auto it = f.begin(); it != f.end(); ++it) {
+								// 		KeyRangeRef kr(it->range().begin, it->range().end);
+								// 		if (it->value() == rd.dataMoveID) {
+								// 			self->dataMoves.insert(kr, UID());
+								// 			TraceEvent("DequeueDataMoveOnSuccess", self->distributorId)
+								// 			    .detail("DataMoveID", rd.dataMoveID)
+								// 			    .detail("DataMoveRange", rd.keys)
+								// 			    .detail("Range", kr);
+								// 		}
+								// 	}
+								// }
 								break;
 							}
 						}
@@ -1328,8 +1455,32 @@ ACTOR Future<Void> dataDistributionRelocator(DDQueueData* self, RelocateData rd,
 					}
 				}
 			} catch (Error& e) {
+				TraceEvent("DequeueDataMove", self->distributorId)
+				    .error(error)
+				    .detail("DataMoveID", rd.dataMoveID)
+				    .detail("Range", rd.keys);
 				error = e;
 			}
+
+			// if (SERVER_KNOBS->ENABLE_PHYSICAL_SHARD_MOVE && error.code() &&
+			//     error.code() != error_code_actor_cancelled && error.code()!= error_code_actor_cancelled) {
+			// 	TraceEvent("DequeueDataMove", self->distributorId)
+			// 	    .error(error)
+			// 	    .detail("Range", rd.keys)
+			// 	    .detail("DataMoveID", rd.dataMoveID);
+			// 	auto f = self->dataMoves.intersectingRanges(rd.keys);
+			// 	std::vector<Future<Void>> actors;
+			// 	for (auto it = f.begin(); it != f.end(); ++it) {
+			// 		if (it->value() == rd.dataMoveID) {
+			// 			KeyRange kr = KeyRangeRef(it->range().begin, it->range().end);
+			// 			actors.push_back(cancelDataMove(self, kr, ddEnabledState));
+			// 			TraceEvent("CancelDataMoveOnError", self->distributorId)
+			// 			    .detail("Range", kr)
+			// 			    .detail("DataMoveID", rd.dataMoveID);
+			// 		}
+			// 	}
+			// 	wait(waitForAll(actors));
+			// }
 
 			//TraceEvent("RelocateShardFinished", distributorId).detail("RelocateId", relocateShardInterval.pairID);
 
@@ -1348,6 +1499,11 @@ ACTOR Future<Void> dataDistributionRelocator(DDQueueData* self, RelocateData rd,
 
 				// onFinished.send( rs );
 				if (!error.code()) {
+					TraceEvent("DataMoveStats", distributorId)
+					    .detail("Duration", now() - startTime)
+					    .detail("TotalBytes", metrics.bytes)
+					    .detail("Rate", (double)metrics.bytes / (now() - startTime))
+					    .detail("Result", "Success");
 					TraceEvent(relocateShardInterval.end(), distributorId)
 					    .detail("Duration", now() - startTime)
 					    .detail("Result", "Success");
@@ -1398,7 +1554,8 @@ ACTOR Future<Void> dataDistributionRelocator(DDQueueData* self, RelocateData rd,
 
 		relocationComplete.send(rd);
 
-		if (e.code() != error_code_actor_cancelled) {
+		// if (e.code() != error_code_actor_cancelled) {
+		if (e.code() != error_code_actor_cancelled && e.code() != error_code_data_move_cancelled) {
 			if (errorOut.canBeSet()) {
 				errorOut.sendError(e);
 			}
@@ -1752,10 +1909,17 @@ ACTOR Future<Void> dataDistributionQueue(Database cx,
 
 			choose {
 				when(RelocateShard rs = waitNext(self.input)) {
-					bool wasEmpty = serversToLaunchFrom.empty();
-					self.queueRelocation(rs, serversToLaunchFrom);
-					if (wasEmpty && !serversToLaunchFrom.empty())
-						launchQueuedWorkTimeout = delay(0, TaskPriority::DataDistributionLaunch);
+					if (rs.restore) {
+						ASSERT(rs.dataMove != nullptr);
+						ASSERT(rs.dataMoveId.isValid());
+						// self.startRelocation(rd.priority, rd.healthPriority);
+						self.launchQueuedWork(RelocateData(rs), ddEnabledState);
+					} else {
+						bool wasEmpty = serversToLaunchFrom.empty();
+						self.queueRelocation(rs, serversToLaunchFrom);
+						if (wasEmpty && !serversToLaunchFrom.empty())
+							launchQueuedWorkTimeout = delay(0, TaskPriority::DataDistributionLaunch);
+					}
 				}
 				when(wait(launchQueuedWorkTimeout)) {
 					self.launchQueuedWork(serversToLaunchFrom, ddEnabledState);
@@ -1841,7 +2005,7 @@ ACTOR Future<Void> dataDistributionQueue(Database cx,
 	} catch (Error& e) {
 		if (e.code() != error_code_broken_promise && // FIXME: Get rid of these broken_promise errors every time we are
 		                                             // killed by the master dying
-		    e.code() != error_code_movekeys_conflict)
+		    e.code() != error_code_movekeys_conflict && e.code() != error_code_data_move_cancelled)
 			TraceEvent(SevError, "DataDistributionQueueError", distributorId).error(e);
 		throw e;
 	}
