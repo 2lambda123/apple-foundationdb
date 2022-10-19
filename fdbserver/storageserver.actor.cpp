@@ -23,7 +23,22 @@
 #include <type_traits>
 #include <unordered_map>
 
-#include "contrib/fmt-8.1.1/include/fmt/format.h"
+#include "fmt/format.h"
+#include "fdbclient/FDBTypes.h"
+#include "fdbrpc/fdbrpc.h"
+#include "fdbrpc/LoadBalance.h"
+#include "fdbserver/OTELSpanContextMessage.h"
+#include "flow/ActorCollection.h"
+#include "flow/Arena.h"
+#include "flow/Error.h"
+#include "flow/Hash3.h"
+#include "flow/Histogram.h"
+#include "flow/IRandom.h"
+#include "flow/IndexedSet.h"
+#include "flow/SystemMonitor.h"
+#include "flow/Trace.h"
+#include "fdbclient/Tracing.h"
+#include "flow/Util.h"
 #include "fdbclient/Atomic.h"
 #include "fdbclient/CommitProxyInterface.h"
 #include "fdbclient/DatabaseContext.h"
@@ -73,7 +88,6 @@
 #include "flow/SystemMonitor.h"
 #include "flow/TDMetric.actor.h"
 #include "flow/Trace.h"
-#include "flow/Tracing.h"
 #include "flow/Util.h"
 #include "flow/genericactors.actor.h"
 
@@ -4822,16 +4836,24 @@ Optional<MutationRef> clipMutation(MutationRef const& m, KeyRangeRef range) {
 bool convertAtomicOp(MutationRef& m, StorageServer::VersionedData const& data, UpdateEagerReadInfo* eager, Arena& ar) {
 	// After this function call, m should be copied into an arena immediately (before modifying data, shards, or eager)
 	if (m.type != MutationRef::ClearRange && m.type != MutationRef::SetValue) {
+		TraceEvent e("ConvertAtomicOp");
+		e.detail("Key", m.param1);
 		Optional<StringRef> oldVal;
 		auto it = data.atLatest().lastLessOrEqual(m.param1);
-		if (it != data.atLatest().end() && it->isValue() && it.key() == m.param1)
+		if (it != data.atLatest().end() && it->isValue() && it.key() == m.param1) {
+			e.detail("OldValueSource", "VersionedDataValue");
 			oldVal = it->getValue();
-		else if (it != data.atLatest().end() && it->isClearTo() && it->getEndKey() > m.param1) {
+		} else if (it != data.atLatest().end() && it->isClearTo() && it->getEndKey() > m.param1) {
 			TEST(true); // Atomic op right after a clear.
+			e.detail("OldValueSource", "VersionedDataClear");
 		} else {
 			Optional<Value>& oldThing = eager->getValue(m.param1);
-			if (oldThing.present())
+			if (oldThing.present()) {
 				oldVal = oldThing.get();
+				e.detail("OldValueSource", "EagerReadValue");
+			} else {
+				e.detail("OldValueSource", "EagerReadNotPresent");
+			}
 		}
 
 		switch (m.type) {
@@ -4859,9 +4881,17 @@ bool convertAtomicOp(MutationRef& m, StorageServer::VersionedData const& data, U
 		case MutationRef::ByteMin:
 			m.param2 = doByteMin(oldVal, m.param2, ar);
 			break;
-		case MutationRef::ByteMax:
+		case MutationRef::ByteMax: {
+			e.detail("Operation", "ByteMax");
+			if (oldVal.present()) {
+				e.detail("OldValue", oldVal.get());
+			} else {
+				e.detail("OldValue", "N/A");
+			}
+			e.detail("Value", m.param2);
 			m.param2 = doByteMax(oldVal, m.param2, ar);
 			break;
+		}
 		case MutationRef::MinV2:
 			m.param2 = doMinV2(oldVal, m.param2, ar);
 			break;
@@ -6917,6 +6947,7 @@ void changeServerKeysWithPhysicalShards(StorageServer* data,
 				updatedShards.push_back(
 				    StorageServerShard(range, version, desiredId, desiredId, StorageServerShard::ReadWrite));
 				setAvailableStatus(data, range, true);
+				data->pendingAddRanges[cVer].emplace_back(desiredId, range);
 				TraceEvent(SevVerbose, "SSInitialShard", data->thisServerID)
 				    .detail("Range", range)
 				    .detail("NowAssigned", nowAssigned)
@@ -8074,6 +8105,19 @@ ACTOR Future<Void> updateStorage(StorageServer* data) {
 			}
 		}
 
+		state bool removeKVSRanges = false;
+		if (!data->pendingRemoveRanges.empty()) {
+			const Version aVer = data->pendingRemoveRanges.begin()->first;
+			if (aVer <= desiredVersion) {
+				TraceEvent(SevDebug, "RemoveRangeVersionSatisfied", data->thisServerID)
+				    .detail("DesiredVersion", desiredVersion)
+				    .detail("DurableVersion", data->durableVersion.get())
+				    .detail("RemoveRangeVersion", aVer);
+				desiredVersion = aVer;
+				removeKVSRanges = true;
+			}
+		}
+
 		if (!data->pendingAddRanges.empty()) {
 			auto u = data->getMutationLog().upper_bound(newOldestVersion);
 			ASSERT(u != data->getMutationLog().end());
@@ -8089,6 +8133,9 @@ ACTOR Future<Void> updateStorage(StorageServer* data) {
 					fAddRanges.push_back(data->storage.addRange(shard.range, shard.shardId));
 				}
 				wait(waitForAll(fAddRanges));
+				for (const auto& shard : data->pendingAddRanges.begin()->second) {
+					data->storage.persistRangeMapping(shard.range, true);
+				}
 				data->pendingAddRanges.erase(data->pendingAddRanges.begin());
 			}
 		}
@@ -8130,6 +8177,24 @@ ACTOR Future<Void> updateStorage(StorageServer* data) {
 			wait(yield(TaskPriority::UpdateStorage));
 			if (done)
 				break;
+		}
+
+		if (removeKVSRanges) {
+			TraceEvent(SevDebug, "RemoveKVSRangesVersionDurable", data->thisServerID)
+			    .detail("NewDurableVersion", newOldestVersion)
+			    .detail("DesiredVersion", desiredVersion)
+			    .detail("OldestRemoveKVSRangesVersion", data->pendingRemoveRanges.begin()->first);
+			ASSERT(newOldestVersion <= data->pendingRemoveRanges.begin()->first);
+			if (newOldestVersion == data->pendingRemoveRanges.begin()->first) {
+				for (const auto& range : data->pendingRemoveRanges.begin()->second) {
+					data->storage.removeRange(range);
+				}
+				for (const auto& range : data->pendingRemoveRanges.begin()->second) {
+					data->storage.persistRangeMapping(range, false);
+				}
+				data->pendingRemoveRanges.erase(data->pendingRemoveRanges.begin());
+			}
+			removeKVSRanges = false;
 		}
 
 		std::set<Key> modifiedChangeFeeds = data->fetchingChangeFeeds;
@@ -8230,12 +8295,12 @@ ACTOR Future<Void> updateStorage(StorageServer* data) {
 			requireCheckpoint = false;
 		}
 
-		while (!data->pendingRemoveRanges.empty() && data->pendingRemoveRanges.begin()->first <= newOldestVersion) {
-			for (const auto& range : data->pendingRemoveRanges.begin()->second) {
-				std::vector<std::string> ignored = data->storage.removeRange(range);
-			}
-			data->pendingRemoveRanges.erase(data->pendingRemoveRanges.begin());
-		}
+		// while (!data->pendingRemoveRanges.empty() && data->pendingRemoveRanges.begin()->first <= newOldestVersion) {
+		// 	for (const auto& range : data->pendingRemoveRanges.begin()->second) {
+		// 		std::vector<std::string> ignored = data->storage.removeRange(range);
+		// 	}
+		// 	data->pendingRemoveRanges.erase(data->pendingRemoveRanges.begin());
+		// }
 
 		if (newOldestVersion > data->rebootAfterDurableVersion) {
 			TraceEvent("RebootWhenDurableTriggered", data->thisServerID)

@@ -41,7 +41,7 @@
 #include "fdbclient/NativeAPI.actor.h"
 #include "fdbclient/BackupAgent.actor.h"
 #include "fdbclient/versions.h"
-#include "fdbclient/WellKnownEndpoints.h"
+#include "fdbrpc/WellKnownEndpoints.h"
 #include "flow/ProtocolVersion.h"
 #include "flow/network.h"
 #include "flow/TypeTraits.h"
@@ -53,13 +53,6 @@
 
 extern "C" int g_expect_full_pointermap;
 extern const char* getSourceVersion();
-
-ISimulator::ISimulator()
-  : desiredCoordinators(1), physicalDatacenters(1), processesPerMachine(0), listenersPerProcess(1), usableRegions(1),
-    allowLogSetKills(true), tssMode(TSSMode::Disabled), isStopped(false), lastConnectionFailure(0),
-    connectionFailuresDisableDuration(0), speedUpSimulation(false), backupAgents(BackupAgentType::WaitForType),
-    drAgents(BackupAgentType::WaitForType), allSwapsDisabled(false) {}
-ISimulator::~ISimulator() = default;
 
 using namespace std::literals;
 
@@ -1090,7 +1083,7 @@ ACTOR Future<Void> restartSimulatedSystem(std::vector<Future<Void>>* systemActor
 		bool enableExtraDB = (testConfig.extraDB == 3);
 		ClusterConnectionString conn(ini.GetValue("META", "connectionString"));
 		if (enableExtraDB) {
-			g_simulator.extraDB = std::make_unique<ClusterConnectionString>(ini.GetValue("META", "connectionString"));
+			g_simulator.extraDB = new ClusterConnectionString(ini.GetValue("META", "connectionString"));
 		}
 		if (!testConfig.disableHostname) {
 			auto mockDNSStr = ini.GetValue("META", "mockDNS");
@@ -1379,7 +1372,7 @@ void SimulationConfig::setDatacenters(const TestConfig& testConfig) {
 void SimulationConfig::setStorageEngine(const TestConfig& testConfig) {
 	// Using [0, 4) to disable the RocksDB storage engine.
 	// TODO: Figure out what is broken with the RocksDB engine in simulation.
-	int storage_engine_type = deterministicRandom()->randomInt(0, 4);
+	int storage_engine_type = deterministicRandom()->randomInt(0, 6);
 	if (testConfig.storageEngineType.present()) {
 		storage_engine_type = testConfig.storageEngineType.get();
 	} else {
@@ -1387,7 +1380,11 @@ void SimulationConfig::setStorageEngine(const TestConfig& testConfig) {
 		while (std::find(testConfig.storageEngineExcludeTypes.begin(),
 		                 testConfig.storageEngineExcludeTypes.end(),
 		                 storage_engine_type) != testConfig.storageEngineExcludeTypes.end()) {
-			storage_engine_type = deterministicRandom()->randomInt(0, 5);
+			storage_engine_type = deterministicRandom()->randomInt(0, 6);
+		}
+		if (std::find(testConfig.storageEngineExcludeTypes.begin(), testConfig.storageEngineExcludeTypes.end(), 5) ==
+		    testConfig.storageEngineExcludeTypes.end()) {
+			storage_engine_type = 5;
 		}
 	}
 
@@ -2106,22 +2103,18 @@ void setupSimulatedSystem(std::vector<Future<Void>>* systemActors,
 	if (testConfig.extraDB == 1) {
 		// The DR database can be either a new database or itself
 		g_simulator.extraDB =
-		    BUGGIFY
-		        ? (useHostname ? std::make_unique<ClusterConnectionString>(coordinatorHostnames, "TestCluster:0"_sr)
-		                       : std::make_unique<ClusterConnectionString>(coordinatorAddresses, "TestCluster:0"_sr))
-		        : (useHostname
-		               ? std::make_unique<ClusterConnectionString>(extraCoordinatorHostnames, "ExtraCluster:0"_sr)
-		               : std::make_unique<ClusterConnectionString>(extraCoordinatorAddresses, "ExtraCluster:0"_sr));
+		    BUGGIFY ? (useHostname ? new ClusterConnectionString(coordinatorHostnames, "TestCluster:0"_sr)
+		                           : new ClusterConnectionString(coordinatorAddresses, "TestCluster:0"_sr))
+		            : (useHostname ? new ClusterConnectionString(extraCoordinatorHostnames, "ExtraCluster:0"_sr)
+		                           : new ClusterConnectionString(extraCoordinatorAddresses, "ExtraCluster:0"_sr));
 	} else if (testConfig.extraDB == 2) {
 		// The DR database is a new database
-		g_simulator.extraDB =
-		    useHostname ? std::make_unique<ClusterConnectionString>(extraCoordinatorHostnames, "ExtraCluster:0"_sr)
-		                : std::make_unique<ClusterConnectionString>(extraCoordinatorAddresses, "ExtraCluster:0"_sr);
+		g_simulator.extraDB = useHostname ? new ClusterConnectionString(extraCoordinatorHostnames, "ExtraCluster:0"_sr)
+		                                  : new ClusterConnectionString(extraCoordinatorAddresses, "ExtraCluster:0"_sr);
 	} else if (testConfig.extraDB == 3) {
 		// The DR database is the same database
-		g_simulator.extraDB = useHostname
-		                          ? std::make_unique<ClusterConnectionString>(coordinatorHostnames, "TestCluster:0"_sr)
-		                          : std::make_unique<ClusterConnectionString>(coordinatorAddresses, "TestCluster:0"_sr);
+		g_simulator.extraDB = useHostname ? new ClusterConnectionString(coordinatorHostnames, "TestCluster:0"_sr)
+		                                  : new ClusterConnectionString(coordinatorAddresses, "TestCluster:0"_sr);
 	}
 
 	*pConnString = conn;
@@ -2371,6 +2364,7 @@ ACTOR void setupAndRun(std::string dataFolder,
 	// https://github.com/apple/foundationdb/issues/5155
 	if (std::string_view(testFile).find("restarting") != std::string_view::npos) {
 		testConfig.storageEngineExcludeTypes.push_back(4);
+		testConfig.storageEngineExcludeTypes.push_back(5);
 
 		// Disable the default tenant in restarting tests for now
 		// TODO: persist the chosen default tenant in the restartInfo.ini file for the second test
@@ -2383,6 +2377,7 @@ ACTOR void setupAndRun(std::string dataFolder,
 	// Re-enable the backup and restore related simulation tests when the tests are passing again.
 	if (std::string_view(testFile).find("Backup") != std::string_view::npos) {
 		testConfig.storageEngineExcludeTypes.push_back(4);
+		testConfig.storageEngineExcludeTypes.push_back(5);
 	}
 
 	// Disable the default tenant in backup and DR tests for now. This is because backup does not currently duplicate
@@ -2396,6 +2391,7 @@ ACTOR void setupAndRun(std::string dataFolder,
 	// in the build.
 	if (!rocksDBEnabled) {
 		testConfig.storageEngineExcludeTypes.push_back(4);
+		testConfig.storageEngineExcludeTypes.push_back(5);
 	}
 
 	state ProtocolVersion protocolVersion = currentProtocolVersion;
