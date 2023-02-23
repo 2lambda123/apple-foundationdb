@@ -1020,9 +1020,7 @@ ACTOR static Future<Void> monitorClientDBInfoChange(DatabaseContext* cx,
 					proxiesChangeTrigger->trigger();
 				}
 			}
-			when(wait(actors.getResult())) {
-				UNSTOPPABLE_ASSERT(false);
-			}
+			when(wait(actors.getResult())) { UNSTOPPABLE_ASSERT(false); }
 		}
 	}
 }
@@ -3540,9 +3538,7 @@ ACTOR Future<Optional<Value>> getValue(Reference<TransactionState> trState,
 					    std::vector<Error>{ transaction_too_old(), future_version() });
 				}
 				choose {
-					when(wait(trState->cx->connectionFileChanged())) {
-						throw transaction_too_old();
-					}
+					when(wait(trState->cx->connectionFileChanged())) { throw transaction_too_old(); }
 					when(GetValueReply _reply = wait(loadBalance(
 					         trState->cx.getPtr(),
 					         locationInfo.locations,
@@ -3684,9 +3680,7 @@ ACTOR Future<Key> getKey(Reference<TransactionState> trState, KeySelector k, Use
 			state GetKeyReply reply;
 			try {
 				choose {
-					when(wait(trState->cx->connectionFileChanged())) {
-						throw transaction_too_old();
-					}
+					when(wait(trState->cx->connectionFileChanged())) { throw transaction_too_old(); }
 					when(GetKeyReply _reply = wait(loadBalance(
 					         trState->cx.getPtr(),
 					         locationInfo.locations,
@@ -3845,9 +3839,7 @@ ACTOR Future<Version> watchValue(Database cx, Reference<const WatchParameters> p
 				                     TaskPriority::DefaultPromiseEndpoint))) {
 					resp = r;
 				}
-				when(wait(cx->connectionRecord ? cx->connectionRecord->onChange() : Never())) {
-					wait(Never());
-				}
+				when(wait(cx->connectionRecord ? cx->connectionRecord->onChange() : Never())) { wait(Never()); }
 			}
 			if (watchValueID.present()) {
 				g_traceBatch.addEvent("WatchValueDebug", watchValueID.get().first(), "NativeAPI.watchValue.After");
@@ -4208,9 +4200,7 @@ Future<RangeResultFamily> getExactRange(Reference<TransactionState> trState,
 				state GetKeyValuesFamilyReply rep;
 				try {
 					choose {
-						when(wait(trState->cx->connectionFileChanged())) {
-							throw transaction_too_old();
-						}
+						when(wait(trState->cx->connectionFileChanged())) { throw transaction_too_old(); }
 						when(GetKeyValuesFamilyReply _rep = wait(loadBalance(
 						         trState->cx.getPtr(),
 						         locations[shard].locations,
@@ -5071,9 +5061,7 @@ ACTOR Future<Void> getRangeStreamFragment(Reference<TransactionState> trState,
 								return Void();
 							}
 
-							when(GetKeyValuesStreamReply _rep = waitNext(replyStream.getFuture())) {
-								rep = _rep;
-							}
+							when(GetKeyValuesStreamReply _rep = waitNext(replyStream.getFuture())) { rep = _rep; }
 						}
 						++trState->cx->transactionPhysicalReadsCompleted;
 					} catch (Error& e) {
@@ -5546,9 +5534,7 @@ ACTOR Future<Void> watch(Reference<Watch> watch,
 				loop {
 					choose {
 						// NativeAPI watchValue future finishes or errors
-						when(wait(watch->watchFuture)) {
-							break;
-						}
+						when(wait(watch->watchFuture)) { break; }
 
 						when(wait(cx->connectionFileChanged())) {
 							CODE_PROBE(true, "Recreated a watch after switch");
@@ -7144,9 +7130,7 @@ ACTOR Future<GetReadVersionReply> getConsistentReadVersion(SpanContext parentSpa
 			state Future<Void> onProxiesChanged = cx->onProxiesChanged();
 
 			choose {
-				when(wait(onProxiesChanged)) {
-					onProxiesChanged = cx->onProxiesChanged();
-				}
+				when(wait(onProxiesChanged)) { onProxiesChanged = cx->onProxiesChanged(); }
 				when(GetReadVersionReply v =
 				         wait(basicLoadBalance(cx->getGrvProxies(UseProvisionalProxies(
 				                                   flags & GetReadVersionRequest::FLAG_USE_PROVISIONAL_PROXIES)),
@@ -7572,9 +7556,7 @@ ACTOR Future<ProtocolVersion> getClusterProtocolImpl(
 				needToConnect = false;
 			}
 			choose {
-				when(wait(coordinator->onChange())) {
-					needToConnect = true;
-				}
+				when(wait(coordinator->onChange())) { needToConnect = true; }
 
 				when(ProtocolVersion pv = wait(protocolVersion)) {
 					if (!expectedVersion.present() || expectedVersion.get() != pv) {
@@ -8967,7 +8949,7 @@ static Future<Void> createCheckpointImpl(T tr,
 		for (const auto& [srcId, ranges] : rangeMap) {
 			// The checkpoint request is sent to all replicas, in case any of them is unhealthy.
 			// An alternative is to choose a healthy replica.
-			const UID checkpointID = UID(srcId.first(), deterministicRandom()->randomUInt64());
+			const UID checkpointID = UID(deterministicRandom()->randomUInt64(), srcId.first());
 			CheckpointMetaData checkpoint(ranges, format, srcMap[srcId], checkpointID, actionId.get());
 			checkpoint.setState(CheckpointMetaData::Pending);
 			tr->set(checkpointKeyFor(checkpointID), checkpointValue(checkpoint));
@@ -9053,17 +9035,20 @@ ACTOR static Future<CheckpointMetaData> getCheckpointMetaDataInternal(KeyRange r
 	throw error.get();
 }
 
-ACTOR static Future<std::vector<CheckpointMetaData>> getCheckpointMetaDataForRange(Database cx,
-                                                                                   KeyRange range,
-                                                                                   Version version,
-                                                                                   CheckpointFormat format,
-                                                                                   Optional<UID> actionId,
-                                                                                   double timeout) {
+ACTOR static Future<std::vector<std::pair<KeyRange, CheckpointMetaData>>> getCheckpointMetaDataForRange(
+    Database cx,
+    KeyRange range,
+    Version version,
+    CheckpointFormat format,
+    Optional<UID> actionId,
+    double timeout) {
 	state Span span("NAPI:GetCheckpointMetaDataForRange"_loc);
 	state int index = 0;
 	state std::vector<Future<CheckpointMetaData>> futures;
+	state std::vector<KeyRangeLocationInfo> locations;
 
 	loop {
+		locations.clear();
 		TraceEvent(SevDebug, "GetCheckpointMetaDataForRangeBegin")
 		    .detail("Range", range.toString())
 		    .detail("Version", version)
@@ -9071,17 +9056,17 @@ ACTOR static Future<std::vector<CheckpointMetaData>> getCheckpointMetaDataForRan
 		futures.clear();
 
 		try {
-			state std::vector<KeyRangeLocationInfo> locations =
-			    wait(getKeyRangeLocations(cx,
-			                              TenantInfo(),
-			                              range,
-			                              CLIENT_KNOBS->TOO_MANY,
-			                              Reverse::False,
-			                              &StorageServerInterface::checkpoint,
-			                              span.context,
-			                              Optional<UID>(),
-			                              UseProvisionalProxies::False,
-			                              latestVersion));
+			wait(store(locations,
+			           getKeyRangeLocations(cx,
+			                                TenantInfo(),
+			                                range,
+			                                CLIENT_KNOBS->TOO_MANY,
+			                                Reverse::False,
+			                                &StorageServerInterface::checkpoint,
+			                                span.context,
+			                                Optional<UID>(),
+			                                UseProvisionalProxies::False,
+			                                latestVersion)));
 
 			for (index = 0; index < locations.size(); ++index) {
 				futures.push_back(getCheckpointMetaDataInternal(
@@ -9093,12 +9078,8 @@ ACTOR static Future<std::vector<CheckpointMetaData>> getCheckpointMetaDataForRan
 			}
 
 			choose {
-				when(wait(cx->connectionFileChanged())) {
-					cx->invalidateCache({}, range);
-				}
-				when(wait(waitForAll(futures))) {
-					break;
-				}
+				when(wait(cx->connectionFileChanged())) { cx->invalidateCache({}, range); }
+				when(wait(waitForAll(futures))) { break; }
 				when(wait(delay(timeout))) {
 					TraceEvent(SevWarn, "GetCheckpointTimeout").detail("Range", range).detail("Version", version);
 				}
@@ -9115,36 +9096,39 @@ ACTOR static Future<std::vector<CheckpointMetaData>> getCheckpointMetaDataForRan
 		}
 	}
 
-	std::vector<CheckpointMetaData> res;
+	std::vector<std::pair<KeyRange, CheckpointMetaData>> res;
 	for (index = 0; index < futures.size(); ++index) {
-		TraceEvent(SevDebug, "GetCheckpointShardEnd").detail("Checkpoint", futures[index].get().toString());
-		res.push_back(futures[index].get());
+		TraceEvent(SevDebug, "GetCheckpointShardEnd")
+		    .detail("Range", locations[index].range)
+		    .detail("Checkpoint", futures[index].get().toString());
+		res.push_back(std::make_pair(locations[index].range, futures[index].get()));
 	}
 	return res;
 }
 
-ACTOR Future<std::vector<CheckpointMetaData>> getCheckpointMetaData(Database cx,
-                                                                    std::vector<KeyRange> ranges,
-                                                                    Version version,
-                                                                    CheckpointFormat format,
-                                                                    Optional<UID> actionId,
-                                                                    double timeout) {
-	state std::vector<Future<std::vector<CheckpointMetaData>>> futures;
+ACTOR Future<std::vector<std::pair<KeyRange, CheckpointMetaData>>> getCheckpointMetaData(Database cx,
+                                                                                         std::vector<KeyRange> ranges,
+                                                                                         Version version,
+                                                                                         CheckpointFormat format,
+                                                                                         Optional<UID> actionId,
+                                                                                         double timeout) {
+	state std::vector<Future<std::vector<std::pair<KeyRange, CheckpointMetaData>>>> futures;
 
 	// TODO(heliu): Avoid send requests to the same shard.
 	for (const auto& range : ranges) {
 		futures.push_back(getCheckpointMetaDataForRange(cx, range, version, format, actionId, timeout));
 	}
 
-	std::vector<std::vector<CheckpointMetaData>> results = wait(getAll(futures));
+	std::vector<std::vector<std::pair<KeyRange, CheckpointMetaData>>> results = wait(getAll(futures));
 
-	std::unordered_set<CheckpointMetaData> checkpoints;
+	std::vector<std::pair<KeyRange, CheckpointMetaData>> res;
 
 	for (const auto& r : results) {
-		checkpoints.insert(r.begin(), r.end());
+		ASSERT(!r.empty());
+		res.insert(res.end(), r.begin(), r.end());
 	}
 
-	return std::vector<CheckpointMetaData>(checkpoints.begin(), checkpoints.end());
+	return res;
 }
 
 ACTOR Future<bool> checkSafeExclusions(Database cx, std::vector<AddressExclusion> exclusions) {
@@ -9769,12 +9753,8 @@ ACTOR Future<Void> changeFeedWhenAtLatest(Reference<ChangeFeedData> self, Versio
 		// only allowed to use empty versions if you're caught up
 		Future<Void> waitEmptyVersion = (self->notAtLatest.get() == 0) ? changeFeedWaitLatest(self, version) : Never();
 		choose {
-			when(wait(waitEmptyVersion)) {
-				break;
-			}
-			when(wait(lastReturned)) {
-				break;
-			}
+			when(wait(waitEmptyVersion)) { break; }
+			when(wait(lastReturned)) { break; }
 			when(wait(self->refresh.getFuture())) {}
 			when(wait(self->notAtLatest.onChange())) {}
 		}

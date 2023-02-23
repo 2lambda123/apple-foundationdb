@@ -24,6 +24,8 @@
 
 #include "fdbclient/FDBTypes.h"
 
+const std::string emptySstFilePath = "Dummy Empty SST File Path";
+
 // FDB storage checkpoint format.
 enum CheckpointFormat {
 	InvalidFormat = 0,
@@ -52,6 +54,7 @@ struct CheckpointMetaData {
 	std::vector<UID> src; // Storage server(s) on which this checkpoint is created.
 	UID checkpointID; // A unique id for this checkpoint.
 	int16_t state; // CheckpointState.
+	Optional<std::string> bytesSampleFile;
 
 	// A serialized metadata associated with format, this data can be understood by the corresponding KVS.
 	Standalone<StringRef> serializedCheckpoint;
@@ -107,14 +110,16 @@ struct CheckpointMetaData {
 		                  " [Version]: " + std::to_string(version) + " [Format]: " + std::to_string(format) +
 		                  " [Server]: " + describe(src) + " [ID]: " + checkpointID.toString() +
 		                  " [State]: " + std::to_string(static_cast<int>(state)) +
-		                  (actionId.present() ? (" [Action ID]: " + actionId.get().toString()) : "");
+		                  (actionId.present() ? (" [Action ID]: " + actionId.get().toString()) : "") +
+		                  (bytesSampleFile.present() ? (" [BytesSampleFile]: " + bytesSampleFile.get()) : "");
 		;
 		return res;
 	}
 
 	template <class Ar>
 	void serialize(Ar& ar) {
-		serializer(ar, version, ranges, format, state, checkpointID, src, serializedCheckpoint, actionId);
+		serializer(
+		    ar, version, ranges, format, state, checkpointID, src, serializedCheckpoint, actionId, bytesSampleFile);
 	}
 };
 
@@ -122,7 +127,17 @@ namespace std {
 template <>
 class hash<CheckpointMetaData> {
 public:
-	size_t operator()(CheckpointMetaData const& checkpoint) const { return checkpoint.checkpointID.hash(); }
+	size_t operator()(CheckpointMetaData const& checkpoint) const {
+		size_t hash1 = checkpoint.checkpointID.hash();
+		size_t hash2 = hash1;
+		if (!checkpoint.src.empty()) {
+			hash2 = checkpoint.src.front().hash();
+		}
+		if (hash1 != hash2) {
+			return hash1 ^ hash2;
+		}
+		return hash1;
+	}
 };
 } // namespace std
 
