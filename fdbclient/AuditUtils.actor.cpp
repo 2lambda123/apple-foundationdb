@@ -146,6 +146,7 @@ ACTOR Future<std::vector<AuditStorageState>> getAuditStateForRange(Database cx, 
 			auditStates = res_;
 			break;
 		} catch (Error& e) {
+			TraceEvent(SevDebug, "GetAuditStateForRangeError").errorUnsuppressed(e).detail("AuditID", id);
 			wait(tr.onError(e));
 		}
 	}
@@ -164,12 +165,18 @@ ACTOR Future<std::vector<AuditStorageState>> getAuditStateForRange(Database cx, 
 	return res;
 }
 
-StringRef auditTypeToString(const AuditType type) {
-	switch (type) {
-	case AuditType::Invalid:
-		return "Invalid"_sr;
-	case AuditType::ValidateHA:
-		return "ValidateHA"_sr;
+ACTOR Future<Void> persistAuditMetadataState(Database cx, UID id, AuditStorageState auditState) {
+	state Transaction tr(cx);
+
+	loop {
+		try {
+			wait(krmSetRange(
+			    &tr, auditRangePrefixFor(auditState.id), auditState.range, auditStorageStateValue(auditState)));
+			break;
+		} catch (Error& e) {
+			wait(tr.onError(e));
+		}
 	}
-	return "Invalid"_sr;
+
+	return Void();
 }

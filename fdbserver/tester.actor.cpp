@@ -1185,12 +1185,15 @@ ACTOR Future<Void> auditStorageCorrectness(Reference<AsyncVar<ServerDBInfo>> dbI
 	loop {
 		try {
 			AuditStorageState auditState = wait(getAuditState(cx, AuditType::ValidateHA, auditId));
-			if (auditState.getPhase() != AuditPhase::Complete) {
-				ASSERT(auditState.getPhase() == AuditPhase::Running);
+			TraceEvent(SevInfo, "AuditStorageResult").detail("AuditStorageState", auditState.toString());
+			const AuditPhase phase = auditState.getPhase();
+			if (phase == AuditPhase::Running) {
 				wait(delay(30));
+			} else if (phase == AuditPhase::Failed) {
+				TraceEvent(SevWarnAlways, "AuditStorageFailed");
+				break;
 			} else {
-				TraceEvent(SevInfo, "AuditStorageResult").detail("AuditStorageState", auditState.toString());
-				ASSERT(auditState.getPhase() == AuditPhase::Complete);
+				ASSERT(phase == AuditPhase::Complete);
 				break;
 			}
 		} catch (Error& e) {
@@ -1313,8 +1316,8 @@ ACTOR Future<bool> runTest(Database cx,
 
 		// Run the consistency check workload
 		if (spec.runConsistencyCheck) {
+			state bool quiescent = g_network->isSimulated() ? !BUGGIFY : spec.waitForQuiescenceEnd;
 			try {
-				bool quiescent = g_network->isSimulated() ? !BUGGIFY : spec.waitForQuiescenceEnd;
 				wait(timeoutError(checkConsistency(cx,
 				                                   testers,
 				                                   quiescent,
@@ -1328,6 +1331,17 @@ ACTOR Future<bool> runTest(Database cx,
 			} catch (Error& e) {
 				TraceEvent(SevError, "TestFailure").error(e).detail("Reason", "Unable to perform consistency check");
 				ok = false;
+			}
+
+			if (quiescent) {
+				try {
+					wait(timeoutError(auditStorageCorrectness(dbInfo), 5000.0));
+				} catch (Error& e) {
+					ok = false;
+					TraceEvent(SevError, "TestFailure")
+					    .error(e)
+					    .detail("Reason", "Unable to perform auditStorage check.");
+				}
 			}
 		}
 	}
@@ -2272,9 +2286,7 @@ ACTOR Future<Void> runTests(Reference<IClusterConnectionRecord> connRecord,
 	}
 
 	choose {
-		when(wait(tests)) {
-			return Void();
-		}
+		when(wait(tests)) { return Void(); }
 		when(wait(quorum(actors, 1))) {
 			ASSERT(false);
 			throw internal_error();

@@ -36,6 +36,7 @@ enum class AuditPhase : uint8_t {
 enum class AuditType : uint8_t {
 	Invalid = 0,
 	ValidateHA = 1,
+	LocationMetadata = 2,
 };
 
 struct AuditStorageState {
@@ -59,8 +60,8 @@ struct AuditStorageState {
 
 	std::string toString() const {
 		std::string res = "AuditStorageState: [ID]: " + id.toString() +
-		                  ", [Range]: " + Traceable<KeyRangeRef>::toString(range) +
-		                  ", [Type]: " + std::to_string(type) + ", [Phase]: " + std::to_string(phase);
+		                  "[Range]: " + Traceable<KeyRangeRef>::toString(range) + "[Type]: " + std::to_string(type) +
+		                  "[Phase]: " + std::to_string(phase);
 		if (!error.empty()) {
 			res += "[Error]: " + error;
 		}
