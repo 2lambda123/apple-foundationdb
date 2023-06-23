@@ -155,11 +155,21 @@ ACTOR Future<UID> auditStorage(Reference<IClusterConnectionRecord> clusterFile,
                                KeyRange range,
                                AuditType type,
                                double timeoutSeconds);
-// Cancel an audit given type and id
+// Cancel an audit given type and id.
 ACTOR Future<UID> cancelAuditStorage(Reference<IClusterConnectionRecord> clusterFile,
                                      AuditType type,
                                      UID auditId,
                                      double timeoutSeconds);
+// Schedule a periodic audit on range of the specific type.
+ACTOR Future<Void> schedulePeriodAuditStorage(Reference<IClusterConnectionRecord> clusterFile,
+                                              KeyRange range,
+                                              AuditType type,
+                                              double periodHours,
+                                              double timeoutSeconds);
+// Cancel periodic audit schedule on range of the specific type.
+ACTOR Future<Void> cancelSchedulePeriodAuditStorage(Reference<IClusterConnectionRecord> clusterFile,
+                                                    AuditType type,
+                                                    double timeoutSeconds);
 
 ACTOR Future<Void> printHealthyZone(Database cx);
 ACTOR Future<bool> clearHealthyZone(Database cx, bool printWarning = false, bool clearSSFailureZoneString = false);

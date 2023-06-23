@@ -2718,6 +2718,59 @@ ACTOR Future<UID> cancelAuditStorage(Reference<IClusterConnectionRecord> cluster
 	return auditId;
 }
 
+ACTOR Future<Void> schedulePeriodAuditStorage(Reference<IClusterConnectionRecord> clusterFile,
+                                              KeyRange range,
+                                              AuditType type,
+                                              double periodHours,
+                                              double timeoutSeconds) {
+	state Reference<AsyncVar<Optional<ClusterInterface>>> clusterInterface(new AsyncVar<Optional<ClusterInterface>>);
+	state Future<Void> leaderMon = monitorLeader<ClusterInterface>(clusterFile, clusterInterface);
+	TraceEvent(SevVerbose, "ManagementAPIScheduleAuditStorageTrigger").detail("AuditType", type).detail("Range", range);
+	try {
+		while (!clusterInterface->get().present()) {
+			wait(clusterInterface->onChange());
+		}
+		TraceEvent(SevVerbose, "ManagementAPIScheduleAuditStorageBegin")
+		    .detail("AuditType", type)
+		    .detail("Range", range);
+		TriggerAuditRequest req(type, range, periodHours);
+		UID auditId = wait(timeoutError(clusterInterface->get().get().triggerAudit.getReply(req), timeoutSeconds));
+		TraceEvent(SevVerbose, "ManagementAPIScheduleAuditStorageEnd").detail("AuditType", type).detail("Range", range);
+	} catch (Error& e) {
+		TraceEvent(SevInfo, "ManagementAPIScheduleAuditStorageError")
+		    .errorUnsuppressed(e)
+		    .detail("AuditType", type)
+		    .detail("Range", range);
+		throw e;
+	}
+
+	return Void();
+}
+
+ACTOR Future<Void> cancelSchedulePeriodAuditStorage(Reference<IClusterConnectionRecord> clusterFile,
+                                                    AuditType type,
+                                                    double timeoutSeconds) {
+	state Reference<AsyncVar<Optional<ClusterInterface>>> clusterInterface(new AsyncVar<Optional<ClusterInterface>>);
+	state Future<Void> leaderMon = monitorLeader<ClusterInterface>(clusterFile, clusterInterface);
+	TraceEvent(SevVerbose, "ManagementAPICancelScheduleAuditStorageTrigger").detail("AuditType", type);
+	try {
+		while (!clusterInterface->get().present()) {
+			wait(clusterInterface->onChange());
+		}
+		TraceEvent(SevVerbose, "ManagementAPICancelScheduleAuditStorageBegin").detail("AuditType", type);
+		TriggerAuditRequest req(type);
+		UID auditId = wait(timeoutError(clusterInterface->get().get().triggerAudit.getReply(req), timeoutSeconds));
+		TraceEvent(SevVerbose, "ManagementAPICancelScheduleAuditStorageEnd").detail("AuditType", type);
+	} catch (Error& e) {
+		TraceEvent(SevInfo, "ManagementAPICancelScheduleAuditStorageError")
+		    .errorUnsuppressed(e)
+		    .detail("AuditType", type);
+		throw e;
+	}
+
+	return Void();
+}
+
 ACTOR Future<Void> waitForPrimaryDC(Database cx, StringRef dcId) {
 	state ReadYourWritesTransaction tr(cx);
 

@@ -120,24 +120,65 @@ struct TriggerAuditRequest {
 	constexpr static FileIdentifier file_identifier = 1384445;
 
 	TriggerAuditRequest() = default;
+
 	TriggerAuditRequest(AuditType type, KeyRange range)
-	  : type(static_cast<uint8_t>(type)), range(range), cancel(false) {}
+	  : type(static_cast<uint8_t>(type)), range(range), cancel(false), periodic(false) {}
 
-	TriggerAuditRequest(AuditType type, UID id) : type(static_cast<uint8_t>(type)), id(id), cancel(true) {}
+	TriggerAuditRequest(AuditType type, KeyRange range, double periodHours)
+	  : type(static_cast<uint8_t>(type)), range(range), cancel(false), periodHours(periodHours), periodic(true) {}
 
-	void setType(AuditType type) { this->type = static_cast<uint8_t>(this->type); }
-	AuditType getType() const { return static_cast<AuditType>(this->type); }
+	TriggerAuditRequest(AuditType type) : type(static_cast<uint8_t>(type)), cancel(true), periodic(true) {}
+
+	TriggerAuditRequest(AuditType type, UID id)
+	  : type(static_cast<uint8_t>(type)), id(id), cancel(true), periodic(false) {}
+
+	inline void setType(AuditType type) { this->type = static_cast<uint8_t>(this->type); }
+	inline AuditType getType() const { return static_cast<AuditType>(this->type); }
 
 	template <class Ar>
 	void serialize(Ar& ar) {
-		serializer(ar, type, range, id, cancel, reply);
+		serializer(ar, type, range, id, cancel, reply, periodic, periodHours);
 	}
 
 	UID id;
 	uint8_t type;
 	KeyRange range;
 	bool cancel;
+	bool periodic;
+	double periodHours;
 	ReplyPromise<UID> reply;
+};
+
+struct AuditStorageScheduleState {
+	constexpr static FileIdentifier file_identifier = 1384446;
+
+	AuditStorageScheduleState() = default;
+
+	AuditStorageScheduleState(TriggerAuditRequest req)
+	  : id(deterministicRandom()->randomUniqueID()), type(static_cast<uint8_t>(req.getType())), range(req.range),
+	    periodHours(req.periodHours), remainWaitHours(req.periodHours), cancelled(false) {}
+
+	inline void setType(AuditType type) { this->type = static_cast<uint8_t>(this->type); }
+	inline AuditType getType() const { return static_cast<AuditType>(this->type); }
+
+	template <class Ar>
+	void serialize(Ar& ar) {
+		serializer(ar, id, type, range, periodHours, remainWaitHours, cancelled);
+	}
+
+	std::string toString() const {
+		std::string res = "AuditStorageScheduleState: [ID]: " + id.toString() +
+		                  ", [Range]: " + Traceable<KeyRangeRef>::toString(range) +
+		                  ", [Type]: " + std::to_string(type) + ", [PeriodHours]: " + std::to_string(periodHours);
+		return res;
+	}
+
+	UID id;
+	uint8_t type;
+	KeyRange range;
+	double periodHours;
+	double remainWaitHours;
+	bool cancelled;
 };
 
 #endif

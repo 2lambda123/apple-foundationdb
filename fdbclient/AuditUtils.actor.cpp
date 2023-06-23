@@ -740,3 +740,143 @@ ACTOR Future<std::vector<AuditStorageState>> getAuditStateByServer(Database cx,
 
 	return res;
 }
+
+ACTOR Future<Void> persistNewAuditScheduleState(Database cx,
+                                                AuditStorageScheduleState auditScheduleState,
+                                                MoveKeyLockInfo lock,
+                                                bool ddEnabled) {
+	state Transaction tr(cx);
+
+	loop {
+		try {
+			tr.setOption(FDBTransactionOptions::PRIORITY_SYSTEM_IMMEDIATE);
+			tr.setOption(FDBTransactionOptions::ACCESS_SYSTEM_KEYS);
+			tr.setOption(FDBTransactionOptions::LOCK_AWARE);
+			wait(checkMoveKeysLock(&tr, lock, ddEnabled, true));
+			tr.set(auditStorageScheduleKey(auditScheduleState.getType()),
+			       auditStorageScheduleStateValue(auditScheduleState));
+			wait(tr.commit());
+			TraceEvent(SevDebug, "AuditUtilPersistAuditSchedule")
+			    .detail("AuditScheduleType", auditScheduleState.getType())
+			    .detail("AuditScheduleKey", auditStorageScheduleKey(auditScheduleState.getType()));
+			break;
+		} catch (Error& e) {
+			TraceEvent(SevDebug, "AuditUtilPersistAuditScheduleError")
+			    .errorUnsuppressed(e)
+			    .detail("AuditScheduleType", auditScheduleState.getType())
+			    .detail("AuditScheduleKey", auditStorageScheduleKey(auditScheduleState.getType()));
+			wait(tr.onError(e));
+		}
+	}
+
+	return Void();
+}
+
+ACTOR Future<bool> updateAuditScheduleState(Database cx,
+                                            AuditStorageScheduleState auditScheduleState,
+                                            MoveKeyLockInfo lock,
+                                            bool ddEnabled) {
+	state Transaction tr(cx);
+
+	loop {
+		try {
+			tr.setOption(FDBTransactionOptions::PRIORITY_SYSTEM_IMMEDIATE);
+			tr.setOption(FDBTransactionOptions::ACCESS_SYSTEM_KEYS);
+			tr.setOption(FDBTransactionOptions::LOCK_AWARE);
+			wait(checkMoveKeysLock(&tr, lock, ddEnabled, true));
+			Optional<Value> res = wait(tr.get(auditStorageScheduleKey(auditScheduleState.getType())));
+			if (!res.present()) {
+				return false;
+			}
+			AuditStorageScheduleState persistScheduleState = decodeAuditStorageScheduleState(res.get());
+			if (auditScheduleState.id != persistScheduleState.id) {
+				return false;
+			} else if (auditScheduleState.cancelled) {
+				return false;
+			}
+			tr.set(auditStorageScheduleKey(auditScheduleState.getType()),
+			       auditStorageScheduleStateValue(auditScheduleState));
+			wait(tr.commit());
+			TraceEvent(SevDebug, "AuditUtilUpdateAuditSchedule")
+			    .detail("AuditScheduleType", auditScheduleState.getType())
+			    .detail("AuditScheduleKey", auditStorageScheduleKey(auditScheduleState.getType()));
+			break;
+		} catch (Error& e) {
+			TraceEvent(SevDebug, "AuditUtilUpdateAuditScheduleError")
+			    .errorUnsuppressed(e)
+			    .detail("AuditScheduleType", auditScheduleState.getType())
+			    .detail("AuditScheduleKey", auditStorageScheduleKey(auditScheduleState.getType()));
+			wait(tr.onError(e));
+		}
+	}
+
+	return true;
+}
+
+ACTOR Future<Void> cancelAuditScheduleState(Database cx, AuditType auditType, MoveKeyLockInfo lock, bool ddEnabled) {
+	state Transaction tr(cx);
+
+	loop {
+		try {
+			tr.setOption(FDBTransactionOptions::PRIORITY_SYSTEM_IMMEDIATE);
+			tr.setOption(FDBTransactionOptions::ACCESS_SYSTEM_KEYS);
+			tr.setOption(FDBTransactionOptions::LOCK_AWARE);
+			wait(checkMoveKeysLock(&tr, lock, ddEnabled, true));
+			Optional<Value> res = wait(tr.get(auditStorageScheduleKey(auditType)));
+			if (!res.present()) {
+				TraceEvent(SevDebug, "AuditUtilCancelAuditScheduleAlreadyCancelled")
+				    .detail("AuditScheduleType", auditType)
+				    .detail("AuditScheduleKey", auditStorageScheduleKey(auditType));
+				break; // already cancelled
+			}
+			AuditStorageScheduleState auditScheduleState = decodeAuditStorageScheduleState(res.get());
+			if (auditScheduleState.cancelled) {
+				TraceEvent(SevDebug, "AuditUtilCancelAuditScheduleAlreadyCancelled2")
+				    .detail("AuditScheduleType", auditType)
+				    .detail("AuditScheduleKey", auditStorageScheduleKey(auditType));
+				break; // already cancelled
+			}
+			auditScheduleState.cancelled = true;
+			tr.set(auditStorageScheduleKey(auditScheduleState.getType()),
+			       auditStorageScheduleStateValue(auditScheduleState));
+			wait(tr.commit());
+			TraceEvent(SevDebug, "AuditUtilCancelAuditSchedule")
+			    .detail("AuditScheduleType", auditType)
+			    .detail("AuditScheduleKey", auditStorageScheduleKey(auditType));
+			break;
+		} catch (Error& e) {
+			TraceEvent(SevDebug, "AuditUtilCancelAuditScheduleError")
+			    .errorUnsuppressed(e)
+			    .detail("AuditScheduleType", auditType)
+			    .detail("AuditScheduleKey", auditStorageScheduleKey(auditType));
+			wait(tr.onError(e));
+		}
+	}
+
+	return Void();
+}
+
+ACTOR Future<std::vector<AuditStorageScheduleState>> getAuditSchedules(Database cx) {
+	state Transaction tr(cx);
+	state std::vector<AuditStorageScheduleState> auditScheduleStates;
+
+	loop {
+		try {
+			auditScheduleStates.clear();
+			tr.setOption(FDBTransactionOptions::PRIORITY_SYSTEM_IMMEDIATE);
+			tr.setOption(FDBTransactionOptions::READ_SYSTEM_KEYS);
+			tr.setOption(FDBTransactionOptions::LOCK_AWARE);
+			state RangeResult res = wait(tr.getRange(auditScheduleKeys, CLIENT_KNOBS->TOO_MANY));
+			ASSERT(!res.more);
+			for (int i = 0; i < res.size(); ++i) {
+				const AuditStorageScheduleState auditScheduleState = decodeAuditStorageScheduleState(res[i].value);
+				auditScheduleStates.push_back(auditScheduleState);
+			}
+			break;
+		} catch (Error& e) {
+			wait(tr.onError(e));
+		}
+	}
+
+	return auditScheduleStates;
+}
