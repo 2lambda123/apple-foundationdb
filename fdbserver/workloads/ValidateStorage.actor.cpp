@@ -23,6 +23,7 @@
 #include "fdbclient/ManagementAPI.actor.h"
 #include "fdbclient/NativeAPI.actor.h"
 #include "fdbserver/Knobs.h"
+#include "fdbserver/QuietDatabase.h"
 #include "fdbrpc/simulator.h"
 #include "fdbserver/workloads/workloads.actor.h"
 #include "flow/Error.h"
@@ -120,7 +121,7 @@ struct ValidateStorage : TestWorkload {
 					wait(delay(30));
 					continue;
 				} else if (auditState.getPhase() == AuditPhase::Error) {
-					break;
+					throw audit_storage_error();
 				} else if (auditState.getPhase() == AuditPhase::Failed) {
 					break;
 				} else {
@@ -262,6 +263,8 @@ struct ValidateStorage : TestWorkload {
 		wait(self->testAuditStorageFunctionality(self, cx));
 		TraceEvent("TestAuditStorageFunctionalityDone");
 
+		wait(self->injectInconsistency(self, cx));
+
 		wait(self->testAuditStorageIDGenerator(self, cx));
 		TraceEvent("TestAuditStorageIDGeneratorDone");
 
@@ -306,6 +309,51 @@ struct ValidateStorage : TestWorkload {
 		    .detail("DebugID", debugID);
 
 		return version;
+	}
+
+	ACTOR Future<Void> injectInconsistency(ValidateStorage* self, Database cx) {
+		TraceEvent("TestInjectInconsistencyBegin");
+		state Transaction tr(cx);
+		loop {
+			tr.setOption(FDBTransactionOptions::PRIORITY_SYSTEM_IMMEDIATE);
+			tr.setOption(FDBTransactionOptions::ACCESS_SYSTEM_KEYS);
+			try {
+				std::vector<StorageServerInterface> interfs = wait(getStorageServers(cx));
+				const UID& dest = interfs[deterministicRandom()->randomInt(0, interfs.size())].uniqueID;
+				tr.set(keyServersKey("TestKeyF"_sr),
+				       keyServersValue({ dest }, {}, deterministicRandom()->randomUniqueID(), UID()));
+				wait(tr.commit());
+				break;
+			} catch (Error& e) {
+				wait(tr.onError(e));
+			}
+		}
+
+		TraceEvent("TestInjectInconsistencyDone");
+
+		try {
+			UID ignored = wait(
+			    self->auditStorageForType(self, cx, AuditType::ValidateLocationMetadata, "TestInjectedCorruption"));
+		} catch (Error& e) {
+			TraceEvent("AuditFailed").error(e);
+			ASSERT(e.code() == error_code_audit_storage_error);
+		}
+
+		tr.reset();
+		loop {
+			tr.setOption(FDBTransactionOptions::PRIORITY_SYSTEM_IMMEDIATE);
+			tr.setOption(FDBTransactionOptions::ACCESS_SYSTEM_KEYS);
+			try {
+				tr.clear(keyServersKey("TestKeyF"_sr));
+				wait(tr.commit());
+				break;
+			} catch (Error& e) {
+				wait(tr.onError(e));
+			}
+		}
+
+		TraceEvent("TestValidateShardKeyServersDone");
+		return Void();
 	}
 
 	void testStringToAuditPhaseFunctionality() {

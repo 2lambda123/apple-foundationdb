@@ -5941,8 +5941,9 @@ ACTOR Future<Void> auditStorageLocationMetadataQ(StorageServer* data, AuditStora
 					                           ssid.toString().c_str());
 					errors.push_back(error);
 					TraceEvent(SevError, "AuditStorageShardLocationMetadataError", data->thisServerID)
+					    .detail("ErrorType", "MissingRangeOnServerKeys")
 					    .detail("AuditId", req.id)
-					    .detail("AuditRange", req.range)
+					    .detail("Ranges", describe(keyServerRanges))
 					    .detail("ClaimRange", claimRange)
 					    .detail("ErrorMessage", error)
 					    .detail("AuditServerID", data->thisServerID);
