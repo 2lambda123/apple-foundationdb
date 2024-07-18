@@ -2837,6 +2837,10 @@ ACTOR void simulationSetupAndRun(std::string dataFolder,
 	    // for this special simulation test.
 	    std::string_view(testFile).find("PhysicalShardMove") == std::string_view::npos) {
 		testConfig.storageEngineExcludeTypes.insert(SimulationStorageEngine::SHARDED_ROCKSDB);
+	} else {
+		testConfig.storageEngineExcludeTypes.insert(SimulationStorageEngine::RADIX_TREE);
+		testConfig.storageEngineExcludeTypes.insert(SimulationStorageEngine::MEMORY);
+		testConfig.storageEngineExcludeTypes.insert(SimulationStorageEngine::REDWOOD);
 	}
 
 	if (std::string_view(testFile).find("Encrypt") != std::string_view::npos) {
