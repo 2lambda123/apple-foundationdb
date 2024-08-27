@@ -330,7 +330,8 @@ def is_no_sim(test_file: Path):
 
 
 def is_rare(test_file: Path):
-	return test_file.parts[-2] == "rare"
+    return test_file.parts[-2] == "rare"
+
 
 class ResourceMonitor(threading.Thread):
     def __init__(self):

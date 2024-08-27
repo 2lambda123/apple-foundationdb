@@ -14,7 +14,7 @@ from typing import Dict, List, Union
 FDB_BASE_REPOSITORY = "https://github.com/apple/foundationdb"
 
 
-def _silent_subprocess(command, mute_even_failed: bool=False, *args, **kwargs) -> str:
+def _silent_subprocess(command, mute_even_failed: bool = False, *args, **kwargs) -> str:
     output = None
     try:
         output = (
@@ -23,7 +23,10 @@ def _silent_subprocess(command, mute_even_failed: bool=False, *args, **kwargs) -
         return output
     except:
         if not mute_even_failed:
-            print(f"Error running subprocess [{' '.join(command)}]:\n{output}", file=sys.stderr)
+            print(
+                f"Error running subprocess [{' '.join(command)}]:\n{output}",
+                file=sys.stderr,
+            )
         raise
 
 
@@ -252,7 +255,6 @@ def _continue_merge():
             merge_progress.cherry_picked += 1
             MergeOperation.write_merge_progress(merge_progress)
 
-
     MergeOperation.delete_merge_progress()
 
     # Tag the pr id to the last merge
@@ -263,7 +265,9 @@ def _drop_current_cherrypick():
     if os.path.exists(os.path.join(GIT_ROOT, ".git", "CHERRY_PICK_HEAD")):
         raise RuntimeError("Cherry pick unresolved")
     merge_progress = MergeOperation.read_merge_progress()
-    print(f"Assuming commit {merge_progress.commit_ids[merge_progress.cherry_picked]} as resolved")
+    print(
+        f"Assuming commit {merge_progress.commit_ids[merge_progress.cherry_picked]} as resolved"
+    )
     merge_progress.cherry_picked += 1
     MergeOperation.write_merge_progress(merge_progress)
 
