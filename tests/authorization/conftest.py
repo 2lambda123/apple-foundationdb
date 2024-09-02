@@ -329,9 +329,9 @@ def token_claim_1h(tenant_id_from_name):
         return {
             "iss": "fdb-authz-tester",
             "sub": "authz-test",
-            "aud": ["tmp-cluster"]
-            if random.choice([True, False])
-            else "tmp-cluster",  # too expensive to parameterize just for this
+            "aud": (
+                ["tmp-cluster"] if random.choice([True, False]) else "tmp-cluster"
+            ),  # too expensive to parameterize just for this
             "iat": now,
             "nbf": now - 1,
             "exp": now + 60 * 60,

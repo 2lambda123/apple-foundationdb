@@ -132,7 +132,7 @@ def setup_metacluster(
         management_cluster_file, management_cluster_name, tenant_id_prefix
     )
     cluster_names_to_files[management_cluster_name] = management_cluster_file
-    for (cf, name, auto_assignment) in data_clusters:
+    for cf, name, auto_assignment in data_clusters:
         metacluster_register(
             management_cluster_file,
             cf,
@@ -453,7 +453,7 @@ number of data clusters: {}
 
     logger.debug("Metacluster setup correctly")
 
-    for (cf, name) in zip(cluster_files[1:], data_cluster_names):
+    for cf, name in zip(cluster_files[1:], data_cluster_names):
         output = metacluster_status(cf)
         expected = 'This cluster "{}" is a data cluster within the metacluster named "{}"'.format(
             name, management_cluster_name

@@ -231,12 +231,12 @@ class SmoothingBudgetLimiter(SmoothingLimiter):
         # self.smooth_filled.set_total(params.time, 1 if release_rate > 0 else 0)
         self.limit = 2.0 * release_rate
 
-        self.proxy_model.results.rate[self.priority][
-            params.time
-        ] = self.smooth_rate_limit.smooth_total(params.time)
-        self.proxy_model.results.released[self.priority][
-            params.time
-        ] = self.smooth_released.smooth_rate(params.time)
+        self.proxy_model.results.rate[self.priority][params.time] = (
+            self.smooth_rate_limit.smooth_total(params.time)
+        )
+        self.proxy_model.results.released[self.priority][params.time] = (
+            self.smooth_released.smooth_rate(params.time)
+        )
         self.proxy_model.results.limit[self.priority][params.time] = self.limit
         self.proxy_model.results.limit_and_budget[self.priority][params.time] = (
             self.limit + self.budget
