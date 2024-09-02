@@ -104,9 +104,9 @@ class ValgrindHandler(xml.sax.handler.ContentHandler):
             if state == ValgrindParseState.STACK:
                 self.state_stack.append(ValgrindParseState.STACK_IP)
                 if len(self.stack[-1].what.backtrace) == 0:
-                    self.stack[
-                        -1
-                    ].what.backtrace = "addr2line -e fdbserver.debug -p -C -f -i "
+                    self.stack[-1].what.backtrace = (
+                        "addr2line -e fdbserver.debug -p -C -f -i "
+                    )
                 else:
                     self.stack[-1].what.backtrace += " "
             else:
