@@ -51,9 +51,9 @@ class DirectoryStateTreeNode:
     @classmethod
     def get_layer(cls, node_subspace_prefix):
         if node_subspace_prefix not in DirectoryStateTreeNode.layers:
-            DirectoryStateTreeNode.layers[
-                node_subspace_prefix
-            ] = DirectoryStateTreeNode(True, False, has_known_prefix=False)
+            DirectoryStateTreeNode.layers[node_subspace_prefix] = (
+                DirectoryStateTreeNode(True, False, has_known_prefix=False)
+            )
 
         return DirectoryStateTreeNode.layers[node_subspace_prefix]
 

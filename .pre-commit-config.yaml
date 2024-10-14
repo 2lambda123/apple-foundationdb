@@ -1,6 +1,6 @@
 repos:
 -   repo: https://github.com/psf/black
-    rev: 2018e667a6a36ee3fbfa8041cd36512f92f60d49  # frozen: 22.8.0
+    rev: 1b2427a2b785cc4aac97c19bb4b9a0de063f9547  # frozen: 24.10.0
     hooks:
     - id: black
       exclude: |
@@ -10,6 +10,6 @@ repos:
               documentation/sphinx/extensions/rubydomain.py
           )$
 -   repo: https://github.com/pycqa/flake8
-    rev: f8e1b317742036ff11ff86356fd2b68147e169f7  # frozen: 5.0.4
+    rev: e43806be3607110919eff72939fda031776e885a  # frozen: 7.1.1
     hooks:
     - id: flake8

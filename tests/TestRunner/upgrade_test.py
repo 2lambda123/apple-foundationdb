@@ -143,7 +143,7 @@ class UpgradeTest:
             expected_version = self.cluster_version
             if expected_version == FUTURE_VERSION:
                 expected_version = CURRENT_VERSION
-            for (_, proc_stat) in status["cluster"]["processes"].items():
+            for _, proc_stat in status["cluster"]["processes"].items():
                 proc_ver = proc_stat["version"]
                 assert (
                     proc_ver == expected_version
