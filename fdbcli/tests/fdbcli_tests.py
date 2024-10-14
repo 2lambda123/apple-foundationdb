@@ -1531,9 +1531,9 @@ if __name__ == "__main__":
     if args.external_client_library:
         # disable local client and use the external client library
         fdbcli_env["FDB_NETWORK_OPTION_DISABLE_LOCAL_CLIENT"] = ""
-        fdbcli_env[
-            "FDB_NETWORK_OPTION_EXTERNAL_CLIENT_LIBRARY"
-        ] = args.external_client_library
+        fdbcli_env["FDB_NETWORK_OPTION_EXTERNAL_CLIENT_LIBRARY"] = (
+            args.external_client_library
+        )
 
     # shell command template
     command_template = [

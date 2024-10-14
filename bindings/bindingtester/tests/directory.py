@@ -459,7 +459,7 @@ class DirectoryTest(Test):
         return instructions
 
     def pre_run(self, db, args):
-        for (path, layer) in self.prepopulated_dirs:
+        for path, layer in self.prepopulated_dirs:
             try:
                 util.get_logger().debug(
                     "Prepopulating directory: %r (layer=%r)" % (path, layer)
