@@ -118,7 +118,7 @@ class RangeCounterTest(unittest.TestCase):
             count_dict = {}
 
             def test_correct():
-                for (k, v) in count_dict.items():
+                for k, v in count_dict.items():
                     rc_count = rc.get_count_for_key(k)
                 assert rc_count == v, "Counts for %s mismatch. Expected %d got %d" % (
                     k,

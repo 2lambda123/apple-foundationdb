@@ -217,6 +217,7 @@ if args.pid:
 else:
     bpf_text = bpf_text.replace("FILTERPID", "")
 
+
 # signal handler
 def signal_ignore(signal, frame):
     pass
