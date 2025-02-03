@@ -148,7 +148,7 @@ if __name__ == "__main__":
         ]
 
         for cmd in args.cmd:
-            for (placeholder, value) in substitution_table:
+            for placeholder, value in substitution_table:
                 cmd = cmd.replace(placeholder, value)
             cmd_args.append(cmd)
         env = dict(**os.environ)

@@ -175,7 +175,8 @@ class TaskBucket(object):
     @fdb.transactional
     def finish(self, tr, taskDict):
         """taskDict is a task previously locked by get_one.  Removes it permanently
-        from the bucket.  If the task has already timed out, raises TaskTimedOutException."""
+        from the bucket.  If the task has already timed out, raises TaskTimedOutException.
+        """
         if self.system_access:
             tr.options.set_access_system_keys()
         rng = self.timeouts.range((taskDict["__task_timeout"], taskDict["__task_key"]))

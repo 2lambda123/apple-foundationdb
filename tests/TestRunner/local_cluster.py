@@ -299,9 +299,11 @@ knob_min_trace_severity=5
                             for key, value in self.custom_config.items()
                         ]
                     ),
-                    use_future_protocol_version="use-future-protocol-version = true"
-                    if self.use_future_protocol_version
-                    else "",
+                    use_future_protocol_version=(
+                        "use-future-protocol-version = true"
+                        if self.use_future_protocol_version
+                        else ""
+                    ),
                 )
             )
             # By default, the cluster only has one process

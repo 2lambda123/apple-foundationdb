@@ -65,7 +65,9 @@ def get_boundary_keys(db_or_tr, begin, end):
     gen = _get_boundary_keys(db_or_tr, begin, end)
     try:
         next(gen)
-    except StopIteration:  # if _get_boundary_keys() never yields a value, e.g. begin > end
+    except (
+        StopIteration
+    ):  # if _get_boundary_keys() never yields a value, e.g. begin > end
         return (x for x in list())
     return gen
 
