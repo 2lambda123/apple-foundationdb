@@ -1,4 +1,4 @@
-"""Maintains work directories for FDB """
+"""Maintains work directories for FDB"""
 
 import logging
 import os
@@ -20,7 +20,6 @@ class WorkDirectory:
         log_directory: str = "log/",
         auto_cleanup: bool = False,
     ):
-
         """Constructor
 
         :param str base_directory: Base directory, if None, uses a temporary directory

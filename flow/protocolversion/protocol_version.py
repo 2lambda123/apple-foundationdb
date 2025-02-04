@@ -251,9 +251,9 @@ class CodeGenBase(abc.ABC):
         env = jinja2.Environment(autoescape=True)
         env = jinja2.Environment(autoescape=True, trim_blocks=True, lstrip_blocks=True)
         env.filters["encode_version"] = encode_version
-        env.filters[
-            "feature_name_transformer"
-        ] = name_transformer.transform_feature_text
+        env.filters["feature_name_transformer"] = (
+            name_transformer.transform_feature_text
+        )
 
         return env
 

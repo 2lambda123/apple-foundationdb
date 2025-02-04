@@ -468,9 +468,9 @@ class Summary:
                     aux_count = 0
                     for aux in valgrind_error.aux:
                         child.attributes["WhatAux{}".format(aux_count)] = aux.what
-                        child.attributes[
-                            "BacktraceAux{}".format(aux_count)
-                        ] = aux.backtrace
+                        child.attributes["BacktraceAux{}".format(aux_count)] = (
+                            aux.backtrace
+                        )
                         aux_count += 1
                     self.out.append(child)
             except Exception as e:

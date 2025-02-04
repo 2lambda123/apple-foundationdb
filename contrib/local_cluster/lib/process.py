@@ -1,4 +1,4 @@
-""" Process management """
+"""Process management"""
 
 import asyncio
 import logging

@@ -71,7 +71,7 @@ class CommitDebugHandler(xml.sax.ContentHandler, object):
             # Trace viewer doesn't seem to care about types, so use host as pid and port as tid
             (pid, tid) = attrs["Machine"].split(":")
             traces = locationToPhase[attrs["Location"]]
-            for (phase, name) in traces:
+            for phase, name in traces:
                 if phase == "b":
                     self._data[(attrs["Machine"], name)] = float(attrs["Time"])
                 else:

@@ -695,7 +695,7 @@ class ReadCounter(object):
 
         if shard_finder:
             results = []
-            for (count, (start, end)) in count_pairs:
+            for count, (start, end) in count_pairs:
                 results.append(
                     (start, end, count, shard_finder.get_addresses_for_key(start))
                 )
@@ -743,7 +743,7 @@ class ReadCounter(object):
         opened_this_range = 0
         count_this_range = 0
 
-        for (start_key, (start_count, end_count)) in self.reads.items():
+        for start_key, (start_count, end_count) in self.reads.items():
             open_count -= end_count
 
             if opened_this_range >= range_size:
@@ -890,7 +890,7 @@ class WriteCounter(object):
 
         start_key = None
         count_this_range = 0
-        for (k, v) in key_counts_sorted:
+        for k, v in key_counts_sorted:
             if not start_key:
                 start_key = k
             count_this_range += v
@@ -914,7 +914,7 @@ class WriteCounter(object):
 
         if shard_finder:
             results = []
-            for (count, key) in count_pairs:
+            for count, key in count_pairs:
                 results.append(
                     (key, None, count, shard_finder.get_addresses_for_key(key))
                 )
@@ -1124,7 +1124,7 @@ def main():
     def print_top(top, total, context):
         if top:
             running_count = 0
-            for (idx, (start, end, count, addresses)) in enumerate(top):
+            for idx, (start, end, count, addresses) in enumerate(top):
                 running_count += count
                 if end is not None:
                     op_str = "Range %r - %r" % (start, end)

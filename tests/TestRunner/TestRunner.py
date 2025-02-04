@@ -152,7 +152,7 @@ class LogParser:
         return obj
 
     def process_return_codes(self, return_codes):
-        for (command, return_code) in return_codes.items():
+        for command, return_code in return_codes.items():
             return_code_trace = {}
             if return_code != 0:
                 return_code_trace["Severity"] = "40"
@@ -195,7 +195,7 @@ class XMLParser(LogParser):
         def startElement(self, name, attrs):
             if name != "Event":
                 return
-            for (key, value) in attrs.items():
+            for key, value in attrs.items():
                 self.result[key] = value
 
     class XMLErrorHandler(xml.sax.handler.ErrorHandler):
@@ -228,7 +228,7 @@ class XMLParser(LogParser):
 
     def write_object(self, obj):
         self.write("<Event")
-        for (key, value) in obj.items():
+        for key, value in obj.items():
             self.write(' {}="{}"'.format(key, value))
         self.write("/>\n")
 

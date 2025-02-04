@@ -267,10 +267,10 @@ def _decode(v, pos):
         return None, pos + 1
     elif code == BYTES_CODE:
         end = _find_terminator(v, pos + 1)
-        return v[pos + 1 : end].replace(b"\x00\xFF", b"\x00"), end + 1
+        return v[pos + 1 : end].replace(b"\x00\xff", b"\x00"), end + 1
     elif code == STRING_CODE:
         end = _find_terminator(v, pos + 1)
-        return v[pos + 1 : end].replace(b"\x00\xFF", b"\x00").decode("utf-8"), end + 1
+        return v[pos + 1 : end].replace(b"\x00\xff", b"\x00").decode("utf-8"), end + 1
     elif code >= INT_ZERO_CODE and code < POS_INT_END:
         n = code - 20
         end = pos + 1 + n
@@ -381,13 +381,13 @@ def _encode(value, nested=False):
             return b"".join([six.int2byte(NULL_CODE)]), -1
     elif isinstance(value, bytes):  # also gets non-None fdb.impl.Value
         return (
-            six.int2byte(BYTES_CODE) + value.replace(b"\x00", b"\x00\xFF") + b"\x00",
+            six.int2byte(BYTES_CODE) + value.replace(b"\x00", b"\x00\xff") + b"\x00",
             -1,
         )
     elif isinstance(value, six.text_type):
         return (
             six.int2byte(STRING_CODE)
-            + value.encode("utf-8").replace(b"\x00", b"\x00\xFF")
+            + value.encode("utf-8").replace(b"\x00", b"\x00\xff")
             + b"\x00",
             -1,
         )

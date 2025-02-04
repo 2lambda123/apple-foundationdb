@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-""" Runs a local FoundationDB cluster
-"""
+"""Runs a local FoundationDB cluster"""
 
 import argparse
 import asyncio

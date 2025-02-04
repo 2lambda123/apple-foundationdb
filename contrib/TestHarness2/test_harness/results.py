@@ -156,9 +156,9 @@ if __name__ == "__main__":
     except ModuleNotFoundError:
         child = SummaryTree("JoshuaNotFound")
         child.attributes["Severity"] = "30"
-        child.attributes[
-            "Message"
-        ] = "Could not import Joshua -- set PYTHONPATH to joshua checkout dir"
+        child.attributes["Message"] = (
+            "Could not import Joshua -- set PYTHONPATH to joshua checkout dir"
+        )
         child.dump(
             sys.stdout,
             prefix=("  " if config.pretty_print else ""),
